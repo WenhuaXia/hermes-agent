@@ -71,6 +71,7 @@ new locking.
 from __future__ import annotations
 
 import contextlib
+import fcntl
 import json
 import os
 import re
@@ -101,6 +102,11 @@ VALID_INITIAL_STATUSES = {"running", "blocked"}
 VALID_WORKSPACE_KINDS = {"scratch", "worktree", "dir"}
 KNOWN_TOOLSET_NAMES = frozenset(name.casefold() for name in get_toolset_names())
 _IS_WINDOWS = sys.platform == "win32"
+
+# Maps id(conn) → open file handle for per-DB write locking.
+# sqlite3.Connection is a C-extension type: no attributes, no weakref.
+# We use id(conn) as key and accept the dict grows lazily.
+_KANBAN_WRITE_LOCKS: dict[int, object] = {}
 
 # A running task's claim is valid for 15 minutes by default; after that the
 # next dispatcher tick reclaims it. Workers that outlive this window should
@@ -1169,6 +1175,16 @@ def connect(
     _guard_existing_db_is_healthy(path)
     resolved = str(path.resolve())
     conn = sqlite3.connect(str(path), isolation_level=None, timeout=30)
+    # Per-DB file-level write lock — prevents multiple worker processes from
+    # racing through BEGIN IMMEDIATE transactions simultaneously, which can
+    # corrupt the WAL under heavy concurrent write pressure (task_events +
+    # task_runs + status transitions all within the same tick).  Windows
+    # (no fcntl) and network filesystems gracefully fall back to no-op.
+    lock_path = path.with_suffix('.db.lock')
+    try:
+        _KANBAN_WRITE_LOCKS[id(conn)] = open(lock_path, 'w')
+    except OSError:
+        _KANBAN_WRITE_LOCKS[id(conn)] = None  # best-effort: don't fail
     try:
         conn.row_factory = sqlite3.Row
         with _INIT_LOCK:
@@ -1473,7 +1489,17 @@ def write_txn(conn: sqlite3.Connection):
     Use for any multi-statement write (creating a task + link, claiming a
     task + recording an event, etc.).  A claim CAS inside this context is
     atomic -- at most one concurrent writer can succeed.
+
+    Additionally, if conn._kanban_write_lock_fd is set (by connect()),
+    an inter-process exclusive file lock is acquired around the entire
+    transaction.  This prevents multiple worker processes from racing
+    through BEGIN IMMEDIATE simultaneously, which can corrupt the WAL
+    under heavy concurrent write pressure.  On platforms without fcntl
+    or when the lock fd is unavailable, this is a graceful no-op.
     """
+    lock_fd = _KANBAN_WRITE_LOCKS.get(id(conn))
+    if lock_fd is not None:
+        fcntl.flock(lock_fd, fcntl.LOCK_EX)
     conn.execute("BEGIN IMMEDIATE")
     try:
         yield conn
@@ -1482,6 +1508,9 @@ def write_txn(conn: sqlite3.Connection):
         raise
     else:
         conn.execute("COMMIT")
+    finally:
+        if lock_fd is not None:
+            fcntl.flock(lock_fd, fcntl.LOCK_UN)
 
 
 # ---------------------------------------------------------------------------
