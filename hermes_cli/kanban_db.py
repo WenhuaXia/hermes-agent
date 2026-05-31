@@ -1439,8 +1439,22 @@ def connect(
                     # process are cheap. The lock prevents same-process dispatcher
                     # threads from racing through the additive ALTER TABLE pass with
                     # stale PRAGMA snapshots during gateway startup.
-                    conn.executescript(SCHEMA_SQL)
-                    _migrate_add_optional_columns(conn)
+                    #
+                    # CRITICAL: DDL writes (executescript + migrations) must be under
+                    # the per-DB .db.lock to prevent racing with other processes'
+                    # write_txn() calls. Without this, a new worker's schema init can
+                    # collide with a dispatching gateway's DML writes, corrupting
+                    # the WAL. .init.lock alone is NOT sufficient because it is a
+                    # different file from .db.lock.
+                    lock_handle = _KANBAN_WRITE_LOCKS.get(id(conn))
+                    if lock_handle is not None:
+                        fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
+                    try:
+                        conn.executescript(SCHEMA_SQL)
+                        _migrate_add_optional_columns(conn)
+                    finally:
+                        if lock_handle is not None:
+                            fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
                     _INITIALIZED_PATHS.add(resolved)
         except Exception:
             conn.close()
