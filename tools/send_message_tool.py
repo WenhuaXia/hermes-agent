@@ -1517,6 +1517,9 @@ async def _send_dingtalk(extra, chat_id, message):
     delivery we use a static robot webhook URL instead, which must be
     configured via ``DINGTALK_WEBHOOK_URL`` env var or ``webhook_url`` in the
     platform's extra config.
+
+    Sends as markdown (matching the live adapter) with fallback to plain text
+    if the API rejects the markdown payload.
     """
     try:
         import httpx
@@ -1526,15 +1529,36 @@ async def _send_dingtalk(extra, chat_id, message):
         webhook_url = extra.get("webhook_url") or os.getenv("DINGTALK_WEBHOOK_URL", "")
         if not webhook_url:
             return {"error": "DingTalk not configured. Set DINGTALK_WEBHOOK_URL env var or webhook_url in dingtalk platform extra config."}
+
+        # Truncate to 20K characters to match the live adapter's limit
+        max_len = 20000
+        if len(message) > max_len:
+            message = message[:max_len]
+
         async with httpx.AsyncClient(timeout=30.0) as client:
-            resp = await client.post(
-                webhook_url,
-                json={"msgtype": "text", "text": {"content": message}},
-            )
+            try:
+                # Send as markdown (same format as live DingTalk adapter)
+                resp = await client.post(
+                    webhook_url,
+                    json={"msgtype": "markdown", "markdown": {"title": "Hermes", "text": message}},
+                )
+            except Exception as e:
+                return _error(f"DingTalk send failed: {e}")
+
             resp.raise_for_status()
             data = resp.json()
             if data.get("errcode", 0) != 0:
-                return _error(f"DingTalk API error: {data.get('errmsg', 'unknown')}")
+                # Fallback to plain text if markdown is rejected
+                errmsg = data.get("errmsg", "")
+                logger.warning("DingTalk markdown rejected (%s), falling back to text", errmsg)
+                resp = await client.post(
+                    webhook_url,
+                    json={"msgtype": "text", "text": {"content": message}},
+                )
+                resp.raise_for_status()
+                data = resp.json()
+                if data.get("errcode", 0) != 0:
+                    return _error(f"DingTalk API error: {data.get('errmsg', 'unknown')}")
         return {"success": True, "platform": "dingtalk", "chat_id": chat_id}
     except Exception as e:
         return _error(f"DingTalk send failed: {e}")
