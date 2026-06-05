@@ -398,6 +398,66 @@ class TestResolveDeliveryTarget:
         assert _resolve_delivery_targets({"deliver": []}) == []
 
 
+class TestPlatformAliases:
+    """Platform name aliases (e.g. wechat → weixin) resolve in cron delivery."""
+
+    def test_wechat_resolves_to_weixin(self, monkeypatch):
+        """deliver='wechat' should resolve to weixin platform with WEIXIN_HOME_CHANNEL."""
+        from cron.scheduler import _resolve_delivery_target
+
+        monkeypatch.setenv("WEIXIN_HOME_CHANNEL", "wxid_test")
+        result = _resolve_delivery_target({"deliver": "wechat"})
+        assert result is not None
+        assert result["platform"] == "weixin"
+        assert result["chat_id"] == "wxid_test"
+
+    def test_wechat_with_explicit_chat_id(self, monkeypatch):
+        """deliver='wechat:specific_chat' passes chat_id through alias resolution."""
+        from cron.scheduler import _resolve_delivery_target
+
+        monkeypatch.setenv("WEIXIN_HOME_CHANNEL", "wxid_test")
+        result = _resolve_delivery_target({"deliver": "wechat:my_chat_id"})
+        assert result is not None
+        assert result["platform"] == "weixin"
+        assert result["chat_id"] == "my_chat_id"
+
+    def test_wechat_in_comma_separated_deliver(self, monkeypatch):
+        """deliver='telegram:-111,wechat' resolves wechat to weixin in multi-target."""
+        from cron.scheduler import _resolve_delivery_targets
+
+        monkeypatch.setenv("TELEGRAM_HOME_CHANNEL", "-111")
+        monkeypatch.setenv("WEIXIN_HOME_CHANNEL", "wxid_test")
+        result = _resolve_delivery_targets({"deliver": "telegram:-111,wechat"})
+        platforms = sorted(t["platform"] for t in result)
+        assert platforms == ["telegram", "weixin"]
+
+    def test_weixin_still_works_directly(self, monkeypatch):
+        """deliver='weixin' continues to work without alias resolution."""
+        from cron.scheduler import _resolve_delivery_target
+
+        monkeypatch.setenv("WEIXIN_HOME_CHANNEL", "wxid_test")
+        result = _resolve_delivery_target({"deliver": "weixin"})
+        assert result is not None
+        assert result["platform"] == "weixin"
+        assert result["chat_id"] == "wxid_test"
+
+    def test_unknown_alias_passes_through(self, monkeypatch):
+        """Non-aliased unknown platforms still fail resolution (no new platforms added)."""
+        from cron.scheduler import _resolve_delivery_target
+
+        result = _resolve_delivery_target({"deliver": "unknown_platform"})
+        assert result is None
+
+    def test_case_insensitive_alias(self, monkeypatch):
+        """deliver='WeChat' (mixed case) also resolves to weixin."""
+        from cron.scheduler import _resolve_delivery_target
+
+        monkeypatch.setenv("WEIXIN_HOME_CHANNEL", "wxid_test")
+        result = _resolve_delivery_target({"deliver": "WeChat"})
+        assert result is not None
+        assert result["platform"] == "weixin"
+
+
 class TestRoutingIntents:
     """``all`` routing intent expands at fire time."""
 
@@ -480,6 +540,22 @@ class TestRoutingIntents:
 
         monkeypatch.setenv("TELEGRAM_HOME_CHANNEL", "-111")
         monkeypatch.setenv("DISCORD_HOME_CHANNEL", "-222")
+        # Clean up any other home channels that might leak from the environment.
+        monkeypatch.delenv("WEIXIN_HOME_CHANNEL", raising=False)
+        monkeypatch.delenv("SLACK_HOME_CHANNEL", raising=False)
+        monkeypatch.delenv("SIGNAL_HOME_CHANNEL", raising=False)
+        monkeypatch.delenv("MATRIX_HOME_ROOM", raising=False)
+        monkeypatch.delenv("MATTERMOST_HOME_CHANNEL", raising=False)
+        monkeypatch.delenv("SMS_HOME_CHANNEL", raising=False)
+        monkeypatch.delenv("EMAIL_HOME_ADDRESS", raising=False)
+        monkeypatch.delenv("DINGTALK_HOME_CHANNEL", raising=False)
+        monkeypatch.delenv("FEISHU_HOME_CHANNEL", raising=False)
+        monkeypatch.delenv("WECOM_HOME_CHANNEL", raising=False)
+        monkeypatch.delenv("QQBOT_HOME_CHANNEL", raising=False)
+        monkeypatch.delenv("QQ_HOME_CHANNEL", raising=False)
+        monkeypatch.delenv("BLUEBUBBLES_HOME_CHANNEL", raising=False)
+        monkeypatch.delenv("WHATSAPP_HOME_CHANNEL", raising=False)
+        monkeypatch.delenv("YUANBAO_HOME_CHANNEL", raising=False)
 
         for token in ("ALL", "All", "all"):
             targets = _resolve_delivery_targets({"deliver": token, "origin": None})

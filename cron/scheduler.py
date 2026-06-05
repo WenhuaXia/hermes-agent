@@ -203,6 +203,15 @@ _LEGACY_HOME_TARGET_ENV_VARS = {
     "QQBOT_HOME_CHANNEL": "QQ_HOME_CHANNEL",
 }
 
+# Platform name aliases for cron delivery.  ``wechat`` is commonly used by
+# users as a synonym for ``weixin`` (the gateway/platform adapter name),
+# but the scheduler only recognises canonical names in ``_KNOWN_DELIVERY_PLATFORMS``.
+# Resolve these aliases so that jobs created with ``deliver: wechat`` work
+# transparently alongside ``deliver: weixin``.
+_DELIVERY_PLATFORM_ALIASES = {
+    "wechat": "weixin",
+}
+
 from cron.jobs import get_due_jobs, mark_job_run, save_job_output, advance_next_run
 
 # Sentinel: when a cron agent has nothing new to report, it can start its
@@ -564,6 +573,11 @@ def _resolve_single_delivery_target(job: dict, deliver_value: str) -> Optional[d
     }
 
 
+def _resolve_platform_alias(platform_name: str) -> str:
+    """Resolve a platform name through the alias map (e.g. ``wechat`` → ``weixin``)."""
+    return _DELIVERY_PLATFORM_ALIASES.get(platform_name.lower(), platform_name)
+
+
 def _normalize_deliver_value(deliver) -> str:
     """Normalize a stored/submitted ``deliver`` value to its canonical string form.
 
@@ -575,13 +589,30 @@ def _normalize_deliver_value(deliver) -> str:
     string ``"['telegram']"``, which is not a known platform and fails
     resolution silently.  Flatten lists/tuples into a comma-separated string
     so both forms work.  Returns ``"local"`` for anything falsy.
+
+    Also resolves platform name aliases (e.g. ``wechat`` → ``weixin``) so that
+    jobs created with common synonyms work transparently.
     """
     if deliver is None or deliver == "":
         return "local"
     if isinstance(deliver, (list, tuple)):
         parts = [str(p).strip() for p in deliver if str(p).strip()]
         return ",".join(parts) if parts else "local"
-    return str(deliver)
+    raw = str(deliver)
+    if "," in raw:
+        parts = [p.strip() for p in raw.split(",") if p.strip()]
+        resolved = []
+        for p in parts:
+            if ":" in p:
+                platform, rest = p.split(":", 1)
+                resolved.append(f"{_resolve_platform_alias(platform)}:{rest}")
+            else:
+                resolved.append(_resolve_platform_alias(p))
+        return ",".join(resolved)
+    if ":" in raw:
+        platform, rest = raw.split(":", 1)
+        return f"{_resolve_platform_alias(platform)}:{rest}"
+    return _resolve_platform_alias(raw)
 
 
 # Routing intent tokens — resolved at fire time, not create time, so a
