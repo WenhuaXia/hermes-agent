@@ -732,7 +732,14 @@ async def _send_to_platform(platform, pconfig, chat_id, message, thread_id=None,
         return await _send_weixin(pconfig, chat_id, message, media_files=media_files)
 
     from gateway.platforms.base import BasePlatformAdapter, utf16_len
-    from gateway.platforms.slack import SlackAdapter
+
+    # Slack adapter import is optional (migrated to plugin in #41112)
+    SlackAdapter = None  # type: ignore
+    try:
+        from gateway.platforms.slack import SlackAdapter
+        _slack_available = True
+    except ImportError:
+        _slack_available = False
 
     # Telegram adapter import is optional (requires python-telegram-bot)
     try:
@@ -743,23 +750,24 @@ async def _send_to_platform(platform, pconfig, chat_id, message, thread_id=None,
 
     # Feishu adapter import is optional (requires lark-oapi)
     try:
-        from gateway.platforms.feishu import FeishuAdapter
+        from plugins.platforms.feishu.adapter import FeishuAdapter
         _feishu_available = True
     except ImportError:
         _feishu_available = False
 
     if platform == Platform.SLACK and message:
-        try:
-            slack_adapter = SlackAdapter.__new__(SlackAdapter)
-            message = slack_adapter.format_message(message)
-        except Exception:
-            logger.debug("Failed to apply Slack mrkdwn formatting in _send_to_platform", exc_info=True)
+        if _slack_available:
+            try:
+                slack_adapter = SlackAdapter.__new__(SlackAdapter)
+                message = slack_adapter.format_message(message)
+            except Exception:
+                logger.debug("Failed to apply Slack mrkdwn formatting in _send_to_platform", exc_info=True)
 
     # Platform message length limits (from adapter class attributes for
     # built-in platforms; from PlatformEntry.max_message_length for plugins).
     _MAX_LENGTHS = {
         Platform.TELEGRAM: TelegramAdapter.MAX_MESSAGE_LENGTH if _telegram_available else 4096,
-        Platform.SLACK: SlackAdapter.MAX_MESSAGE_LENGTH,
+        Platform.SLACK: SlackAdapter.MAX_MESSAGE_LENGTH if _slack_available else 4096,
     }
     if _feishu_available:
         _MAX_LENGTHS[Platform.FEISHU] = FeishuAdapter.MAX_MESSAGE_LENGTH
@@ -1687,7 +1695,7 @@ async def _send_dingtalk(extra, chat_id, message):
 async def _send_wecom(extra, chat_id, message):
     """Send via WeCom using the adapter's WebSocket send pipeline."""
     try:
-        from gateway.platforms.wecom import WeComAdapter, check_wecom_requirements
+        from plugins.platforms.wecom.adapter import WeComAdapter, check_wecom_requirements
         if not check_wecom_requirements():
             return {"error": "WeCom requirements not met. Need aiohttp + WECOM_BOT_ID/SECRET."}
     except ImportError:
@@ -1762,10 +1770,10 @@ async def _send_bluebubbles(extra, chat_id, message):
 async def _send_feishu(pconfig, chat_id, message, media_files=None, thread_id=None):
     """Send via Feishu/Lark using the adapter's send pipeline."""
     try:
-        from gateway.platforms.feishu import FeishuAdapter, FEISHU_AVAILABLE
+        from plugins.platforms.feishu.adapter import FeishuAdapter, FEISHU_AVAILABLE
         if not FEISHU_AVAILABLE:
             return {"error": "Feishu dependencies not installed. Run: pip install 'hermes-agent[feishu]'"}
-        from gateway.platforms.feishu import FEISHU_DOMAIN, LARK_DOMAIN
+        from plugins.platforms.feishu.adapter import FEISHU_DOMAIN, LARK_DOMAIN
     except ImportError:
         return {"error": "Feishu dependencies not installed. Run: pip install 'hermes-agent[feishu]'"}
 

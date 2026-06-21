@@ -28,6 +28,8 @@ __all__ = [
     "SendResult",
     "QQAdapter",
     "YuanbaoAdapter",
+    "FeishuAdapter",
+    "WeComAdapter",
 ]
 
 
@@ -38,6 +40,12 @@ def __getattr__(name):
     if name == "YuanbaoAdapter":
         from .yuanbao import YuanbaoAdapter  # noqa: F401
         return YuanbaoAdapter
+    if name in ("FeishuAdapter",):
+        from plugins.platforms.feishu.adapter import FeishuAdapter  # noqa: F401
+        return FeishuAdapter
+    if name in ("WeComAdapter",):
+        from plugins.platforms.wecom.adapter import WeComAdapter  # noqa: F401
+        return WeComAdapter
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
