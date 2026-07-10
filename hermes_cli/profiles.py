@@ -244,8 +244,10 @@ _DEFAULT_EXPORT_INCLUDE_ROOT = frozenset({
 })
 
 # Names that cannot be used as profile aliases
+# Only 'hermes' and 'default' are truly reserved — the rest were causing
+# inconsistency where profiles could be created but not deleted.
 _RESERVED_NAMES = frozenset({
-    "hermes", "default", "test", "tmp", "root", "sudo",
+    "hermes", "default",
 })
 
 # Hermes subcommands that cannot be used as profile names/aliases
