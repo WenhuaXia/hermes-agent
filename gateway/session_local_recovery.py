@@ -185,9 +185,43 @@ def restore_local_session(authority, sid):
         adapter.policies[chat_id] = policy
         authority.sessions[sid] = LiveSession(source, route)
         adapter.register_source(source)
+        # FIX-2087: instance provenance for the silent-refusal forensics below (INFO once per
+        # register; the elif logs only on refusal, so the pair identifies adapter/source identity).
+        logging.getLogger(__name__).info(
+            'Local session %s registered: adapter id=%d source id=%d',
+            sid, id(adapter), id(source))
     elif (not adapter.authorize_source(live.source)
           or live.source.to_dict() != source.to_dict()
           or adapter.policies.get(chat_id) != policy):
+        # FIX-2087 diagnostic: this refusal is a bare retryable code, logged at DEBUG only
+        # (_log_refusal), and nothing re-syncs — the 10-25→10-30 outage was 118 such refusals
+        # per generation, silent for 5 days. Name the diverged condition and the instance
+        # identities; the raise is unchanged (behavior-neutral).
+        try:
+            import dataclasses as _dc
+            _mem = adapter.policies.get(chat_id)
+            _stored = adapter.sources.get(chat_id)
+            logging.getLogger(__name__).warning(
+                'Bot Chat preflight divergence (FIX-2087): sid=%s adapter id=%d '
+                'authorize=%s source_eq=%s policy_eq=%s sources_has_key=%s stored_source_id=%r '
+                'live_source_id=%r (registered pair from the "registered" INFO line)',
+                sid, id(adapter), adapter.authorize_source(live.source),
+                live.source.to_dict() == source.to_dict(), _mem == policy,
+                _stored is not None,
+                id(_stored[0]) if _stored else None, id(live.source))
+            if _mem is None:
+                logging.getLogger(__name__).warning(
+                    'Bot Chat preflight divergence: in-memory policy missing for chat_id=%s (adapter id=%d)',
+                    chat_id, id(adapter))
+            elif _mem != policy:
+                for _f in _dc.fields(policy):
+                    if getattr(_mem, _f.name) != getattr(policy, _f.name):
+                        logging.getLogger(__name__).warning(
+                            'Bot Chat preflight divergence: policy field %s differs (mem=%r db=%r)',
+                            _f.name, str(getattr(_mem, _f.name))[:160],
+                            str(getattr(policy, _f.name))[:160])
+        except Exception:
+            logging.getLogger(__name__).debug('FIX-2087 diagnostic failed', exc_info=True)
         raise RuntimeStoreError('storage_unavailable')
     else:
         with store._lock:
