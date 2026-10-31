@@ -199,7 +199,40 @@ def restore_local_session(authority, sid):
     elif (not adapter.authorize_source(live.source)
           or live.source.to_dict() != source.to_dict()
           or adapter.policies.get(chat_id) != policy):
-        raise RuntimeStoreError('storage_unavailable')
+        # The stored receipt passed every ownership/consistency check above (owned_receipt,
+        # _checked_entry, validate_local_lineage); only this process's in-memory view has
+        # diverged from it. The classic case: an event-path hook mutates the registered
+        # source in place — the hermes-feishu-card patch stamps ``source.message_id`` in
+        # gateway/run_turn.py on every non-feishu turn — so ``live.source.to_dict()`` stops
+        # matching the receipt-derived source and EVERY further restore of this session
+        # refused with a bare retryable code until the next process generation: a silent,
+        # self-perpetuating delivery blackout (the first delivery of a generation
+        # registered OK, all the rest were refused; only a restart healed it).
+        # The receipt is the durable truth, so rebuild the registration from it —
+        # memory <- DB, exactly what the register branch does for a cold session —
+        # and the divergence heals on the next claim instead of pinning the session
+        # dead until a restart.
+        diverged = [name for name, bad in (
+            ('authorization', not adapter.authorize_source(live.source)),
+            ('source', live.source.to_dict() != source.to_dict()),
+            ('policy', adapter.policies.get(chat_id) != policy),
+        ) if bad]
+        logging.getLogger(__name__).warning(
+            'Local session %s re-synced from stored receipt: diverged=%s', sid, ','.join(diverged))
+        with store._lock:
+            store._ensure_loaded_locked()
+            current = store._entries.get(route)
+            if current is not None and current.session_id != target:
+                if not _stray_route_target(authority, receipt, current.session_id):
+                    raise RuntimeStoreError('admission_conflict')
+                current = None
+            if current is not None:
+                entry.yolo = current.yolo
+            entry.origin = source
+            store._entries[route] = entry
+        live.source = source
+        adapter.policies[chat_id] = policy
+        adapter.register_source(source)
     elif _route_already_restored(store, route, target, receipt.get('lineage', [sid])):
         pass  # every claim of a live session lands here: no write, so no wait on the store lock
     else:
