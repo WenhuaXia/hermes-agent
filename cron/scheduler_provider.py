@@ -14,6 +14,8 @@ from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Any
 
+from cron import scheduler_presence
+
 logger = logging.getLogger(__name__)
 
 # Cap for exponential tick backoff during fd exhaustion (interval doubled per failure).
@@ -476,6 +478,10 @@ class InProcessCronScheduler(CronScheduler):
             # Heartbeat before the first sleep so `hermes cron status` sees a live ticker
             # immediately.
             record_ticker_heartbeat()
+            # Record this process's presence on the store before the first tick: a one-shot due
+            # in the offline gap since the previous process's last heartbeat is caught up once
+            # (late) instead of retired.
+            _guarded_store_write(scheduler_presence.on_startup, "presence on_startup")
         except BaseException as e:
             logger.error("Cron startup recovery error: %s", e, exc_info=True)
             _guarded_store_write(
@@ -580,6 +586,9 @@ class InProcessCronScheduler(CronScheduler):
                             recovered, home,
                         )
                     record_ticker_heartbeat()
+                    # Record this process's presence on the store before its first tick, so a
+                    # one-shot due in the offline gap is caught up once (late), not retired.
+                    _guarded_store_write(scheduler_presence.on_startup, "presence on_startup")
             except BaseException as e:
                 logger.error(
                     "Cron startup recovery error for profile at %s: %s", home, e, exc_info=True

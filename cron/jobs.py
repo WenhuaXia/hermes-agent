@@ -33,7 +33,7 @@ from cron.constants import CLAIM_TTL_INACTIVITY_HEADROOM, FIRE_CLAIM_SKEW_SECOND
 from cron.env_settings import cron_env_setting
 from cron.jobs_invariants import _validate_job_mode_invariants
 from cron.scheduler_ownership import _claim_owner_is_dead
-from cron import store_health
+from cron import scheduler_presence, store_health
 from typing import Optional, Dict, List, Any, Callable, Set, Tuple, Union, Collection
 
 logger = logging.getLogger(__name__)
@@ -3138,6 +3138,11 @@ def _retire_expired_oneshot(d: _DueJob) -> bool:
     # Due during an outage of its store: it was skipped, not missed; fire it once on recovery.
     if store_health.outage_covers(_current_cron_store().cron_dir, d.next_run_dt.timestamp(), ONESHOT_GRACE_SECONDS):
         return False
+    # Due while the scheduler PROCESS was absent (gap this process recorded at startup, on disk):
+    # it was skipped, not missed — the old catch-up was in-memory and died with the gateway.
+    # Fire it once, late, instead of retiring it.
+    if scheduler_presence.gap_covers(_current_cron_store().cron_dir, d.next_run_dt.timestamp(), ONESHOT_GRACE_SECONDS):
+        return False
     claim = d.job.get("run_claim")
     # An outage-covered claim that never reached its fire claim never started: it stays covered.
     if isinstance(claim, dict) and claim.get("outage") and not d.job.get("fire_claim"):
@@ -3268,9 +3273,15 @@ def _evaluate_due_job(job: dict[str, Any], scan: _DueScan, run_claim_ttl: float)
         # same HERMES_HOME must not re-dispatch it while in flight, and advancing next_run_at by a
         # fixed window is not enough for a run that outlives a tick. The other process sees the
         # fresh claim and skips; mark_job_run() clears it. The TTL only covers a tick that DIES.
-        claim = {"at": now.isoformat(), "by": _machine_id()}
-        if _elapsed_seconds(now, d.next_run_dt) > ONESHOT_GRACE_SECONDS:  # only an outage lets it through
-            claim["outage"] = True
+        claim: dict = {"at": now.isoformat(), "by": _machine_id()}
+        if _elapsed_seconds(now, d.next_run_dt) > ONESHOT_GRACE_SECONDS:
+            # Only a store outage or a scheduler-presence gap lets a one-shot past grace through;
+            # tag the claim with which so a late catch-up run is distinguishable in the record.
+            if scheduler_presence.gap_covers(_current_cron_store().cron_dir,
+                                             d.next_run_dt.timestamp(), ONESHOT_GRACE_SECONDS):
+                claim["late"] = "presence_gap"
+            else:
+                claim["outage"] = True
         job["run_claim"] = claim
         scan.persist(job["id"], run_claim=claim)
 

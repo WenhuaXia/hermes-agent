@@ -5,7 +5,7 @@ import contextlib
 import logging
 import time
 
-from cron import store_health
+from cron import scheduler_presence, store_health
 from cron.constants import is_recurring
 
 logger = logging.getLogger("cron.scheduler")
@@ -112,6 +112,11 @@ def _tick_admitted(
         return 0
 
     try:
+        # Presence beat for the store this tick is admitted on (throttled; this process's first
+        # observation also records the offline gap it detected, so a one-shot due in that gap is
+        # caught up once, not retired — cron.scheduler_presence). Best-effort: never breaks a tick.
+        scheduler_presence.heartbeat()
+
         # `hermes pause` ESTOP: skip dispatch, never touch in-flight runs; check_paused logs once.
         with contextlib.suppress(ImportError):
             from agent.estop import check_paused as _estop_check_paused
