@@ -178,3 +178,45 @@ async def test_delete_retires_owner_receipts_and_never_resurrects_the_id(tmp_pat
         bind_api_session(authority, 'api-owner')
     assert authority.db.get_session(local.session_id) is None
     assert authority.db.get_session('api-owner') is None
+
+
+@pytest.mark.asyncio
+async def test_restore_resyncs_when_a_hook_mutates_the_registered_source(tmp_path, monkeypatch):
+    """An event-path hook mutating the registered local source in place (the
+    hermes-feishu-card patch stamps ``source.message_id`` in gateway/run_turn.py on
+    every non-feishu turn) must not wedge ``restore_local_session`` into a bare
+    ``storage_unavailable`` refusal for the rest of the process generation: the
+    stored receipt is the durable truth, so the registration is rebuilt from it."""
+    from gateway.config import GatewayConfig, Platform
+    from gateway.session import SessionStore
+    from gateway.session_authority import initialize_session_authority
+    from gateway.session_contract import Principal
+    from gateway.session_local import create_local_session
+    from gateway.session_local_recovery import restore_local_session
+    from gateway import run
+
+    config = {'platform_toolsets': {'cli': []}}
+    monkeypatch.setattr(run, '_load_gateway_config', lambda: config)
+    store = SessionStore(tmp_path / 'sessions', GatewayConfig())
+    runner = SimpleNamespace(session_store=store, _session_db=store._db,
+                             adapters={}, _draining=False)
+    authority = await initialize_session_authority(runner, profile_id='fixture', instance_id='first')
+    actor = Principal('owner', 'fixture', frozenset({'session:create', 'session:read'}), 'socket')
+    params = {'request_id': 'resync', 'source': 'gui', 'cwd': str(tmp_path), 'model': 'frozen', 'toolsets': []}
+    ref = create_local_session(authority, actor, params)
+    sid = ref.session_id
+
+    # A turn runs on the session and the hook stamps the shared source in place.
+    live = authority.sessions[sid]
+    live.source.message_id = 'om_fix2087_anchor'
+    adapter = runner.adapters[Platform.LOCAL]
+    # The stamp is invisible to authorization (identity tuple) — the production signature.
+    assert adapter.authorize_source(live.source)
+
+    # The diverged restore must re-sync (receipt is truth), not refuse.
+    assert restore_local_session(authority, sid) == ref
+    # The registration is clean again: no residue, and a second mutation also heals.
+    assert authority.sessions[sid].source.message_id is None
+    authority.sessions[sid].source.message_id = 'om_fix2087_anchor2'
+    assert restore_local_session(authority, sid) == ref
+    assert authority.sessions[sid].source.message_id is None
