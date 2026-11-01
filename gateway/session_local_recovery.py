@@ -209,8 +209,16 @@ def restore_local_session(authority, sid):
         logging.getLogger(__name__).info(
             'Local session %s registered: adapter id=%d source id=%d',
             sid, id(adapter), id(source))
+    # FIX-2087: compare the STABLE source identity, not the full wire dict. ``to_dict()`` carries
+    # per-message volatile fields (``message_id`` pin/reply/react, display names) that a restored
+    # live source keeps from the turn that created it while every delivery rebuilds the canonical
+    # ``local_source`` without them — so a message_id-only difference false-diverged this guard and
+    # killed the profile's bot-chat delivery for the whole process lifetime (118 consecutive
+    # ``storage_unavailable`` refusals, 10-25→10-30). ``_identity`` (platform, chat_id, user_id,
+    # profile, chat_type) is the adapter's own session-identity definition (the same tuple
+    # ``authorize_source`` gates on), so a genuine session change still refuses.
     elif (not adapter.authorize_source(live.source)
-          or live.source.to_dict() != source.to_dict()
+          or adapter._identity(live.source) != adapter._identity(source)
           or adapter.policies.get(chat_id) != policy):
         # FIX-2087 diagnostic: this refusal is a bare retryable code, logged at DEBUG only
         # (_log_refusal), and nothing re-syncs — the 10-25→10-30 outage was 118 such refusals
