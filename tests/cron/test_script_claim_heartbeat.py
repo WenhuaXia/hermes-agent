@@ -2,11 +2,39 @@
 
 from datetime import datetime, timedelta, timezone
 import contextlib
+import json
+import os
+import subprocess
+import sys
 import threading
 import time
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
+
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+
+
+def _remove_job_in_cli_subprocess(job_id: str, hermes_home: Path) -> int:
+    """run ``remove_job`` in a SEPARATE python process — the shape of an agent's
+    ``hermes cron rm <id>`` terminal call (no in-run self-removal marker in its ContextVars).
+    Returns the subprocess exit code."""
+    code = (
+        "import sys\n"
+        "from cron import jobs\n"
+        "sys.exit(0 if jobs.remove_job(sys.argv[1]) else 1)\n"
+    )
+    env = {
+        k: v for k, v in os.environ.items()
+        if k not in {"HERMES_HOME", "HERMES_MACHINE_ID"}
+    }
+    env.update({"HERMES_HOME": str(hermes_home), "PYTHONPATH": str(_REPO_ROOT)})
+    result = subprocess.run(
+        [sys.executable, "-c", code, job_id],
+        cwd=str(_REPO_ROOT), env=env, capture_output=True, text=True, timeout=120, check=False)
+    assert result.returncode in (0, 1), result.stderr[-2000:]
+    return result.returncode
 
 
 @pytest.mark.platforms("posix")
@@ -489,6 +517,186 @@ def test_self_removal_followed_by_replacement_record_stays_fail_closed(tmp_path,
     finished.assert_called_once_with(
         "replacement-execution", success=False,
         error="Fire claim ownership lost; stale result was discarded.")
+
+
+def test_cross_process_self_removal_delivers_final_response(tmp_path, monkeypatch):
+    """A run whose agent removed its own job from a SEPARATE CLI process (``hermes cron rm``
+    from the run's terminal — no in-run marker) must still deliver its final response and
+    close its ledger row completed: remove_job() leaves a self-removal tombstone bound to the
+    fire-claim token the run held (FIX-2097)."""
+    from cron import executions, jobs
+
+    def _cli_self_remove(jobs_mod, job):
+        # Seed a live execution row owned by THIS process (the simulated gateway) so a
+        # wrongly-taken operator path would leave a cancel marker behind.
+        monkeypatch.setattr(executions, "EXECUTIONS_FILE", tmp_path / "cron" / "executions.db")
+        executions.create_execution(job["id"], source="direct")
+        assert _remove_job_in_cli_subprocess(job["id"], tmp_path) == 0
+        tombstone = jobs_mod.read_self_removal_tombstone(job["id"])
+        assert tombstone is not None and tombstone["self"] is True
+        assert tombstone["claim_by"] == job["fire_claim"]["by"]
+        assert jobs_mod.load_jobs() == []
+
+    delivered, finished = _run_claimed_job_with_mid_run_action(
+        tmp_path, monkeypatch, _cli_self_remove,
+        execution_id="cli-self-removal-execution")
+
+    delivered.assert_called_once()
+    finished.assert_called_once_with(
+        "cli-self-removal-execution",
+        success=True, error=None, delivery_outcome="delivered")
+    # The removal was self-removal: the live run was NOT asked to cancel. The seeded ledger
+    # row makes this observable — an operator-path removal would have written a cancel marker.
+    cancels = tmp_path / "cron" / "cancels"
+    assert not cancels.exists() or list(cancels.iterdir()) == []
+
+
+def test_cross_process_self_removal_followed_by_replacement_stays_fail_closed(tmp_path, monkeypatch):
+    """A replacement record reclaiming the id after a cross-process self-removal belongs to
+    another owner: the tombstone must not rescue the stale run — its result is discarded."""
+
+    def _cli_remove_then_replace(jobs_mod, job):
+        assert _remove_job_in_cli_subprocess(job["id"], tmp_path) == 0
+        replacement = {k: v for k, v in job.items() if k != "execution_id"}
+        replacement["fire_claim"] = {"at": job["fire_claim"]["at"], "by": "other-machine:owner"}
+        jobs_mod.save_jobs(jobs_mod.load_jobs() + [replacement])
+
+    delivered, finished = _run_claimed_job_with_mid_run_action(
+        tmp_path, monkeypatch, _cli_remove_then_replace,
+        execution_id="cli-replacement-execution")
+
+    delivered.assert_not_called()
+    finished.assert_called_once_with(
+        "cli-replacement-execution", success=False,
+        error="Fire claim ownership lost; stale result was discarded.")
+
+
+def _spawn_detached_cli_removal(job_id: str, hermes_home: Path, *, wait_for: Path, timeout: float = 90.0) -> None:
+    """Perform the removal in a process whose ancestry does NOT contain this test process — the
+    shape of an operator's own shell: an intermediate parent spawns the real CLI process
+    (``start_new_session``) and exits immediately, so the remover is re-parented to init before
+    it can walk its ancestor chain. Blocks until ``wait_for`` appears (the removal's last
+    observable side effect)."""
+    inner = (
+        "import os, sys\n"
+        "sys.path.insert(0, os.environ['PYTHONPATH'])\n"
+        "from cron import jobs\n"
+        "sys.exit(0 if jobs.remove_job(sys.argv[1]) else 1)\n"
+    )
+    mid = (
+        "import subprocess, sys\n"
+        f"subprocess.Popen([sys.executable, '-c', {inner!r}, sys.argv[1]], start_new_session=True)\n"
+        "sys.exit(0)\n"
+    )
+    env = {k: v for k, v in os.environ.items() if k not in {"HERMES_HOME", "HERMES_MACHINE_ID"}}
+    env.update({"HERMES_HOME": str(hermes_home), "PYTHONPATH": str(_REPO_ROOT)})
+    subprocess.run([sys.executable, "-c", mid, job_id], env=env, cwd=str(_REPO_ROOT),
+                   capture_output=True, text=True, timeout=30, check=False)
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if wait_for.exists():
+            return
+        time.sleep(0.05)
+    raise AssertionError(f"detached removal never produced {wait_for}")
+
+
+def test_operator_removal_from_unrelated_process_cancels_and_is_not_self(tmp_path, monkeypatch):
+    """An operator's ``hermes cron rm`` from a shell that is NOT a descendant of the claim
+    holder must keep the designed mid-run removal behavior: the live run gets a cancel request,
+    the tombstone is self=False, and the run's result is not rescued — even though the claim
+    token on the tombstone matches the run's owner."""
+    from cron import executions, jobs
+
+    with jobs.use_cron_store(tmp_path):
+        job = jobs.create_job(prompt="work", schedule="every 5m", name="operator rm")
+        assert jobs.claim_job_for_fire(job["id"])
+        claimed = jobs.get_job(job["id"])
+        assert claimed is not None
+        token = claimed["fire_claim"]["by"]
+        # Seed a live execution row owned by THIS process (the simulated gateway), so the
+        # detached remover's cancel_job_run has a run to cancel and leaves an observable marker.
+        monkeypatch.setattr(executions, "EXECUTIONS_FILE", tmp_path / "cron" / "executions.db")
+        row = executions.create_execution(job["id"], source="direct")
+        marker = tmp_path / "cron" / "cancels" / f"{row['id']}.cancel"
+        _spawn_detached_cli_removal(job["id"], tmp_path, wait_for=marker)
+
+        tombstone = jobs.read_self_removal_tombstone(job["id"])
+        assert tombstone is not None and tombstone["self"] is False
+        assert tombstone["claim_by"] == token
+        assert marker.exists()
+        # The run holding that claim is not rescued, despite the matching token.
+        assert jobs.self_removal_delivery_allowed(job["id"], expected_owner=token) is False
+
+
+def test_self_removal_tombstone_owner_binding(tmp_path, monkeypatch):
+    """A stale self=True tombstone must not rescue a run that held a DIFFERENT claim token:
+    the claim_by binding is what stops a prior removal from leaking into a later run of the
+    same (reused) job id."""
+    from cron import jobs
+
+    with jobs.use_cron_store(tmp_path):
+        job = jobs.create_job(prompt="work", schedule="every 5m", name="owner binding")
+        marker_dir = tmp_path / "cron" / "self_removal_markers"
+        marker_dir.mkdir(parents=True, exist_ok=True)
+        (marker_dir / f"{job['id']}.json").write_text(
+            json.dumps({"self": True, "claim_by": "host:12345:stale-claim-token"}),
+            encoding="utf-8")
+        assert jobs.self_removal_delivery_allowed(job["id"], expected_owner="host:12345:stale-claim-token") is False  # record still exists
+        assert jobs.remove_job(job["id"])
+        # Record gone: the stale token still must not match a run that never held it.
+        assert jobs.self_removal_delivery_allowed(job["id"], expected_owner="host:12345:other-claim-token") is False
+        # ...but it matches the run that actually held it (nothing has replaced the id).
+        assert jobs.self_removal_delivery_allowed(job["id"], expected_owner="host:12345:stale-claim-token") is True
+
+
+def test_self_removal_tombstones_are_pruned_after_ttl(tmp_path, monkeypatch):
+    """Tombstones are only needed while the run they bridge can still reconcile; prune them
+    after the TTL on the next write so the markers dir never accumulates."""
+    from cron import jobs
+
+    with jobs.use_cron_store(tmp_path):
+        job = jobs.create_job(prompt="work", schedule="every 5m", name="ttl prune")
+        markers = tmp_path / "cron" / "self_removal_markers"
+        markers.mkdir(parents=True, exist_ok=True)
+        stale = markers / "stale-job.json"
+        stale.write_text('{"self": true}', encoding="utf-8")
+        old = time.time() - jobs.SELF_REMOVAL_TOMBSTONE_TTL_SECONDS - 1
+        os.utime(stale, (old, old))
+        assert jobs.claim_job_for_fire(job["id"])
+        assert jobs.remove_job(job["id"])
+        assert not stale.exists()
+        assert (markers / f"{job['id']}.json").exists()
+
+
+def test_ownership_lost_discard_logs_job_name_and_response_size(tmp_path, monkeypatch, caplog):
+    """The discard path used to be silent (no incident, no log) — the WARNING names the job
+    and the dropped response size so a later sweep does not need four-source archaeology."""
+    import logging
+    from cron import jobs, scheduler
+
+    finished = MagicMock()
+    monkeypatch.setattr(scheduler, "finish_lost_execution", finished)
+    with jobs.use_cron_store(tmp_path), caplog.at_level(
+            logging.WARNING, logger="cron.scheduler"):
+        scheduler._record_fire_ownership_lost(
+            {"id": "lost-job", "name": "lost name"}, "owner-x", "exec-x",
+            final_response="hello world")
+
+    finished.assert_called_once()
+    messages = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert any("lost-job" in m and "lost name" in m and "discarding final response (11 chars)" in m
+               for m in messages)
+
+
+def test_cron_preamble_carries_self_removal_guardrail():
+    """The run prompt tells the agent that self-removal is its LAST action and the final
+    response is the only delivered output — so the completion report is not stranded in a
+    deleted job."""
+    from cron.scheduler_prompt import _CRON_HINT
+
+    assert "SELF-REMOVAL" in _CRON_HINT
+    assert "LAST" in _CRON_HINT
+    assert "final response is the only output that gets delivered" in _CRON_HINT
 
 
 def test_initially_lost_fire_claim_finishes_execution_without_running(monkeypatch):

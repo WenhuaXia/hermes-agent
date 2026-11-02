@@ -14,6 +14,7 @@ import threading
 import time
 import os
 import re
+import tempfile
 import uuid
 
 # Cross-process advisory locking for jobs.json: fcntl (Unix) or msvcrt (Windows). If both are
@@ -158,13 +159,130 @@ def self_removal_delivery_scope(job_id: str):
         _self_removal_delivery.reset(token)
 
 
-def self_removal_delivery_allowed(job_id: str) -> bool:
+def self_removal_delivery_allowed(job_id: str, expected_owner: Optional[str] = None) -> bool:
     """Whether the active run deleted exactly its own job record and no record has since taken
-    its id (a replacement record belongs to another owner, so that stays fail-closed)."""
+    its id (a replacement record belongs to another owner, so that stays fail-closed).
+
+    ``expected_owner`` (the run's fire-claim ``by`` token) enables the cross-process fallback:
+    an agent that removes its own job through the terminal (``hermes cron rm``) runs the
+    removal in a SEPARATE CLI process whose ContextVars never see the in-process marker above,
+    so without the fallback the run loses fire-claim ownership and its final response is
+    discarded. The removal leaves a self-removal tombstone bound to the claim token it dropped;
+    only the run that held that exact token may rely on it."""
     marker = _self_removal_delivery.get()
-    if marker is None or marker.job_id != job_id or not marker.removed:
+    if marker is not None and marker.job_id == job_id and marker.removed:
+        return all(item.get("id") != job_id for item in load_jobs())
+    if expected_owner:
+        tombstone = read_self_removal_tombstone(job_id)
+        if (
+            tombstone is not None
+            and tombstone.get("self")
+            and tombstone.get("claim_by") == expected_owner
+        ):
+            return all(item.get("id") != job_id for item in load_jobs())
+    return False
+
+
+# --- Cross-process self-removal tombstones ---------------------------------
+#
+# remove_job() runs wherever the deletion happens — for an agent's terminal call that is a
+# separate CLI process. The run it deletes the record out from under can still only recover
+# via the in-process marker (same thread), so the deletion leaves a small tombstone next to
+# jobs.json, bound to the fire-claim token it dropped. A removal counts as SELF-REMOVAL only
+# when the deleting process is a descendant of the process holding the claim (the agent's CLI
+# shell is; an operator's shell is not), which keeps operator mid-run removals on the
+# designed cancel + discard path.
+
+SELF_REMOVAL_TOMBSTONE_TTL_SECONDS = 7 * 24 * 3600
+
+
+def _self_removal_markers_dir() -> Path:
+    return _current_cron_store().cron_dir / "self_removal_markers"
+
+
+def _self_removal_tombstone_path(job_id: Any) -> Optional[Path]:
+    job_id = str(job_id or "").strip()
+    if not job_id or "/" in job_id or "\\" in job_id or job_id in {".", ".."}:
+        return None
+    return _self_removal_markers_dir() / f"{job_id}.json"
+
+
+def read_self_removal_tombstone(job_id: str) -> Optional[dict]:
+    """The tombstone remove_job() left for this id, or None (absent/unreadable/corrupt)."""
+    path = _self_removal_tombstone_path(job_id)
+    if path is None:
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _prune_stale_self_removal_tombstones() -> None:
+    directory = _self_removal_markers_dir()
+    cutoff = time.time() - SELF_REMOVAL_TOMBSTONE_TTL_SECONDS
+    with contextlib.suppress(OSError):
+        for entry in directory.iterdir():
+            with contextlib.suppress(OSError):
+                if entry.is_file() and entry.stat().st_mtime < cutoff:
+                    entry.unlink()
+
+
+def _write_self_removal_tombstone(job: dict, claim: dict, *, self_removal: bool) -> None:
+    """Record a cross-process removal so the run that held the claim can still reconcile.
+    Atomic (temp file + rename) so a concurrent reader never sees a half-written marker."""
+    path = _self_removal_tombstone_path(job.get("id"))
+    if path is None:
+        return
+    payload = {
+        "ts": _hermes_now().isoformat(),
+        "by_pid": os.getpid(),
+        "name": str(job.get("name") or "")[:200],
+        "claim_by": str(claim.get("by") or ""),
+        "claimed_at": str(claim.get("at") or ""),
+        "self": bool(self_removal),
+    }
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f"{path.name}.", suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                json.dump(payload, handle)
+            os.replace(tmp, path)
+        finally:
+            with contextlib.suppress(OSError):
+                os.unlink(tmp)  # no-op once the rename consumed it
+        _prune_stale_self_removal_tombstones()
+    except OSError:
+        logger.debug(
+            "Failed to write self-removal tombstone for job %s", job.get("id"), exc_info=True)
+
+
+def _removal_is_by_claim_owner(claim: dict) -> bool:
+    """True when THIS process is a descendant of the process holding the fire claim — the
+    shape of an agent deleting its own job from the run's terminal (``hermes cron rm``).
+
+    Fail-closed: an owner token that is not ``<host>:<pid>:<uuid>`` (e.g. an explicit
+    ``HERMES_MACHINE_ID``), a foreign hostname, or any process-table lookup error all
+    return False, which keeps the removal on the operator cancel + discard path."""
+    import socket
+
+    by = str(claim.get("by") or "")
+    machine, _, token = by.rpartition(":")
+    if not token:
         return False
-    return all(item.get("id") != job_id for item in load_jobs())
+    host, _, pid = machine.rpartition(":")
+    if not pid.isdigit() or (host and host != socket.gethostname()):
+        return False
+    try:
+        import psutil  # type: ignore
+        for parent in psutil.Process(os.getpid()).parents():
+            if parent.pid == int(pid):
+                return True
+    except Exception:
+        return False
+    return False
 
 # Import-time snapshot so deliberate re-pointing of CRON_DIR/JOBS_FILE/OUTPUT_DIR (the documented
 # escape hatch for tests/embedders) is distinguishable from the constants merely being stale.
@@ -419,7 +537,7 @@ def fire_claim_fence(job_id: str, *, expected_owner: str):
             claim = job.get("fire_claim") if isinstance(job, dict) else None
             owns_claim = isinstance(claim, dict) and claim.get("by") == expected_owner
             if job is None:
-                owns_claim = self_removal_delivery_allowed(job_id)
+                owns_claim = self_removal_delivery_allowed(job_id, expected_owner=expected_owner)
         yield owns_claim
 
 
@@ -2318,11 +2436,27 @@ def remove_job(job_id: str) -> bool:
             return False
         # Resolve BEFORE saving so a legacy unsafe ID fails closed without a half-applied removal.
         job_output_dir = _job_output_dir(canonical_id)
-        save_jobs(jobs, removed_ids={canonical_id})
         marker = _self_removal_delivery.get()
+        self_removal = False
+        if marker is None:
+            # Cross-process removal (terminal/CLI, dashboard, another profile). If a run was
+            # holding the fire claim, leave a tombstone so that run can reconcile its final
+            # delivery instead of discarding it as a stale ownership loss. Written BEFORE the
+            # save: a tombstone without a deletion is inert (the fallback also requires the
+            # record to be gone), while the reverse order leaves a crash window in which the
+            # record is gone but no tombstone exists.
+            raw_claim = job.get("fire_claim")
+            if isinstance(raw_claim, dict) and raw_claim.get("by"):
+                self_removal = _removal_is_by_claim_owner(raw_claim)
+                _write_self_removal_tombstone(job, raw_claim, self_removal=self_removal)
+        save_jobs(jobs, removed_ids={canonical_id})
         if marker is not None and marker.job_id == canonical_id:
             marker.removed = True
-        else:  # someone else removed it: its live run must stop, not burn tokens to a discard
+        elif self_removal:
+            # The run deleted its own job from its own terminal: let it finish and deliver.
+            pass
+        else:
+            # someone else removed it: its live run must stop, not burn tokens to a discard
             cancel_job_run(canonical_id, reason="job removed while running")
         if job_output_dir.exists():
             shutil.rmtree(job_output_dir)

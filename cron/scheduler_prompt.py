@@ -286,7 +286,14 @@ _CRON_HINT = (
     "the task now. NEVER create or update a cron job because of "
     "recurring or future-schedule language in the task prompt below; "
     "treat phrasing like \"each Monday\" or \"every day at 9\" as "
-    "context for this run, not as a request to schedule another job.]\n\n"
+    "context for this run, not as a request to schedule another job. "
+    "SELF-REMOVAL: If the task tells you to delete or remove this "
+    "cron job once the work is done, make that removal your LAST "
+    "action and put the complete completion report in your final "
+    "response — after the job record is removed, this run's final "
+    "response is the only output that gets delivered. Never remove "
+    "the job before the work is verifiably complete, and never "
+    "remove a job the task did not ask you to remove.]\n\n"
 )
 
 

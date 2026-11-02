@@ -2750,8 +2750,9 @@ def _run_with_fire_claim_heartbeat(job: dict, run) -> bool:
         while not stop.wait(_RUN_CLAIM_HEARTBEAT_SECONDS):
             try:
                 if not heartbeat_fire_claim(job_id, expected_owner=owner):
-                    if self_removal_delivery_allowed(job_id):
-                        # Record dropped by this run; nothing left to keep fresh.
+                    if self_removal_delivery_allowed(job_id, expected_owner=owner):
+                        # Record dropped by this run (in-process marker, or a self-removal
+                        # tombstone from a separate CLI process); nothing left to keep fresh.
                         continue
                     # One miss is a sample, not a verdict (#113357): a latch cancels the live
                     # agent run and ends the lease refresh, so confirm before acting on it.
@@ -2904,6 +2905,7 @@ _OWNERSHIP_LOST_INTERRUPTED = "Interrupted by shutdown before terminal completio
 
 def _record_fire_ownership_lost(
     job: dict, fire_owner: Optional[str], execution_id: str,
+    final_response: Optional[str] = None,
 ) -> None:
     """Bookkeeping after fire-claim ownership loss. A transport-level cancel (dashboard drain) is
     not a real loss — we still own the claim, so record the interruption via the owner-fenced
@@ -2919,6 +2921,11 @@ def _record_fire_ownership_lost(
         )
         finish_execution(execution_id, success=False, error=_OWNERSHIP_LOST_INTERRUPTED)
     else:
+        logger.warning(
+            "Job '%s' (%s): fire claim ownership lost; discarding final response (%d chars). "
+            "If this run removed its own job (e.g. `hermes cron rm` from inside the run), this "
+            "discard is the known self-removal gap — check the job's self-removal tombstone.",
+            job_id, job.get("name") or "?", len(final_response or ""))
         finish_lost_execution(
             execution_id, "Fire claim ownership lost; stale result was discarded.")
 
@@ -3018,8 +3025,9 @@ class _FireOwnership:
             return True
         if self.owner is None:
             return False
-        if self_removal_delivery_allowed(self.job["id"]):
-            # The run deleted its own record; there is no claim left to re-resolve.
+        if self_removal_delivery_allowed(self.job["id"], expected_owner=self.owner):
+            # The run deleted its own record (marker, or cross-process tombstone bound to
+            # this run's claim token); there is no claim left to re-resolve.
             return False
         # The heartbeat's latched miss is one sample, not the verdict (#113357): the store is
         # re-checked here, and a claim that still validates keeps the run's real outcome. The
@@ -3069,7 +3077,7 @@ def _save_compose_deliver(
             raise _FireClaimLostDuringSideEffect
         # remove_job() already deleted this job's output dir; saving would re-create an orphan.
         output_file = (
-            None if self_removal_delivery_allowed(job["id"])
+            None if self_removal_delivery_allowed(job["id"], expected_owner=fence.owner)
             else save_job_output(job["id"], output))
     if verbose and output_file is not None:
         logger.info("Output saved to: %s", output_file)
@@ -3358,7 +3366,7 @@ def _run_one_job_body(
 
         if _fire_claim_ownership_lost():
             _teardown_deferred()
-            _record_fire_ownership_lost(job, fire_owner, execution_id)
+            _record_fire_ownership_lost(job, fire_owner, execution_id, final_response=final_response)
             return True
 
         success, error, agent_declared = _apply_agent_failure_marker(job, success, error, final_response)
@@ -3379,7 +3387,7 @@ def _run_one_job_body(
 
         if d.side_effect_ownership_lost:
             # The claim died inside a side-effect fence: the side effect did NOT complete.
-            _record_fire_ownership_lost(job, fire_owner, execution_id)
+            _record_fire_ownership_lost(job, fire_owner, execution_id, final_response=final_response)
             return True
 
         from cron.scheduler_bookkeeping import fail_empty_response
@@ -3402,7 +3410,7 @@ def _run_one_job_body(
                         "Job '%s': transport cancellation arrived before terminal completion; "
                         "recording the interrupted run",
                         job["id"])
-                _record_fire_ownership_lost(job, fire_owner, execution_id)
+                _record_fire_ownership_lost(job, fire_owner, execution_id, final_response=final_response)
                 return True
 
         if _consume_interrupted_flag(job["id"], execution_token):
@@ -3455,7 +3463,8 @@ def _run_one_job_body(
         try:
             if (
                 not _consume_interrupted_flag(job["id"], execution_token)
-                and not self_removal_delivery_allowed(job["id"])  # no record left to mark
+                and not self_removal_delivery_allowed(
+                    job["id"], expected_owner=fire_owner)  # no record left to mark
             ):
                 mark_kwargs = {}
                 if fire_owner is not None:

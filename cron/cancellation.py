@@ -178,7 +178,7 @@ def finish_cancelled_run(job: dict[str, Any], execution_id: str, fire_owner: Opt
     from cron.unreachable_retry import is_retry_run
 
     reason = CancelRequest(execution_id).reason
-    if not scheduler.self_removal_delivery_allowed(job["id"]):
+    if not scheduler.self_removal_delivery_allowed(job["id"], expected_owner=fire_owner):
         owner = {"expected_fire_owner": fire_owner} if fire_owner is not None else {}
         # A stopped ladder re-run re-ran an occurrence that already counted: no second repeat slot.
         rung = {"ladder_rung": True} if is_retry_run(job) else {}
