@@ -540,7 +540,18 @@ def _local_automation_owner(authority, adapter, event, entry):
     from gateway.session_local_recovery import restore_local_session
     ref = restore_local_session(authority, event.source.chat_id)
     live = authority.sessions[ref.session_id]
-    if (live.source is not event.source or not adapter.authorize_source(event.source)
+    # FIX-2101: the completion-notification path rebuilds ``event.source`` via
+    # ``_build_process_event_source`` (a fresh canonical ``local_source``), so object identity
+    # with the authority's registered live source never holds — the old gate false-refused EVERY
+    # local async-delegation completion with ``permission_denied``. That refusal is non-permanent
+    # (``PERMANENT_REFUSAL_REASONS`` = not_found/invalid_params), so the durable claim was
+    # deferred (``delivery_attempts`` refunded to 0) and the watcher requeued it forever: the row
+    # sat ``delivery_state=pending, delivery_attempts=0`` and the parent session never saw the
+    # report. Compare the STABLE source identity (the same tuple ``authorize_source`` gates on)
+    # and authorize the LIVE source (the registered object) — a genuine session change still
+    # refuses, a rebuilt same-session source admits. Mirrors FIX-2087's guard relaxation.
+    if (adapter._identity(live.source) != adapter._identity(event.source)
+            or not adapter.authorize_source(live.source)
             or authority.runner._adapter_for_source(live.source) is not adapter):
         raise RuntimeStoreError('permission_denied')
     return ref, live
