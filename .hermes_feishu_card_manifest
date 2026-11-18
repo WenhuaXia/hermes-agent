@@ -1,0 +1,154 @@
+{
+  "manifest_version": 4,
+  "layout": "gateway-decomposed-v1",
+  "integration_mode": "legacy-patch",
+  "targets": {
+    "gateway/run.py": {
+      "path": "gateway/run.py",
+      "backup": "gateway/run.py.hermes_feishu_card.bak",
+      "original_sha256": "680c3c2cea322293f10ed52dd5a98546128a971623bad2d03c0e53052c649fb2",
+      "patched_sha256": "680c3c2cea322293f10ed52dd5a98546128a971623bad2d03c0e53052c649fb2"
+    },
+    "gateway/run_background.py": {
+      "path": "gateway/run_background.py",
+      "backup": "gateway/run_background.py.hermes_feishu_card.bak",
+      "original_sha256": "18fdb6a7fe408361544eca51d15659ec868d02876abce6866bc139bc454ff27f",
+      "patched_sha256": "18fdb6a7fe408361544eca51d15659ec868d02876abce6866bc139bc454ff27f"
+    },
+    "gateway/run_turn.py": {
+      "path": "gateway/run_turn.py",
+      "backup": "gateway/run_turn.py.hermes_feishu_card.bak",
+      "original_sha256": "32de792e49dbe085fca9ce17cf75e522a7ef67dcc375bd465e274127f089e333",
+      "patched_sha256": "1c085aa8f86ef99b99fe59dfbe2cb92ee7da311dd21a6547c03be290728b7264"
+    },
+    "gateway/run_turn_persistence.py": {
+      "path": "gateway/run_turn_persistence.py",
+      "backup": "gateway/run_turn_persistence.py.hermes_feishu_card.bak",
+      "original_sha256": "421a6e53664e91fcd7850908651a8ffdeef9d8b9b16a5883650a907459a94bfa",
+      "patched_sha256": "bb77aae0da9cc392a5d7df294c10806c7434eff26acc419696209fe5cb12c0e6"
+    },
+    "gateway/run_turn_prepare.py": {
+      "path": "gateway/run_turn_prepare.py",
+      "backup": "gateway/run_turn_prepare.py.hermes_feishu_card.bak",
+      "original_sha256": "63fdc7cbdf694e7b7a22b309dd99f131b23adf0e606e107c608d895b2a24edda",
+      "patched_sha256": "63fdc7cbdf694e7b7a22b309dd99f131b23adf0e606e107c608d895b2a24edda"
+    },
+    "gateway/run_turn_hygiene.py": {
+      "path": "gateway/run_turn_hygiene.py",
+      "backup": "gateway/run_turn_hygiene.py.hermes_feishu_card.bak",
+      "original_sha256": "ce9d47df93e786da4547b2bf019e608bf553f893c877a6d2d22c72a05da4cf64",
+      "patched_sha256": "ce9d47df93e786da4547b2bf019e608bf553f893c877a6d2d22c72a05da4cf64"
+    },
+    "gateway/run_turn_runner.py": {
+      "path": "gateway/run_turn_runner.py",
+      "backup": "gateway/run_turn_runner.py.hermes_feishu_card.bak",
+      "original_sha256": "76a97f48cc5f769c84991644957e0e9d64c4be60dbd0774ec7457e740da253fb",
+      "patched_sha256": "15d7c781b00484737743a6fc288c1f2c52230ab4b013345d5de5157ca9d54aaf"
+    },
+    "gateway/run_inbound.py": {
+      "path": "gateway/run_inbound.py",
+      "backup": "gateway/run_inbound.py.hermes_feishu_card.bak",
+      "original_sha256": "8113f9fc356f18c6eeaf985e1e523a09826933dea2b81ed227461b9f559dae39",
+      "patched_sha256": "971d77238832d34371a4abcb5873712342949f959756b4a9847d6e838d8fa7f4"
+    },
+    "gateway/run_busy.py": {
+      "path": "gateway/run_busy.py",
+      "backup": "gateway/run_busy.py.hermes_feishu_card.bak",
+      "original_sha256": "0cda08c818b0b23bd6cf784073688fbf5ee05015d95feb5ecd8c90775a0c7f2e",
+      "patched_sha256": "f719aa55835dcff95fcea079d6359d8589916636480df21840fd0229f870774b"
+    },
+    "gateway/run_startup.py": {
+      "path": "gateway/run_startup.py",
+      "backup": "gateway/run_startup.py.hermes_feishu_card.bak",
+      "original_sha256": "51e47a16005c7ae68f190499c5998e3fffeb1c4df07a9ccdee2bec1012fd6884",
+      "patched_sha256": "b3d0bb622929a25a6aa9324ede42cf42f16948acf53f8a047bccec66068292fd"
+    },
+    "gateway/run_notifications.py": {
+      "path": "gateway/run_notifications.py",
+      "backup": "gateway/run_notifications.py.hermes_feishu_card.bak",
+      "original_sha256": "09566558ee1f967c90f62871c992db2e5922c062bdb534167e55257bdf65b003",
+      "patched_sha256": "e156bced1c28743477f6c405aa833f40b9ef5836ac258a7b1705ec6b7a056c71"
+    },
+    "cron/scheduler.py": {
+      "path": "cron/scheduler.py",
+      "backup": "cron/scheduler.py.hermes_feishu_card.bak",
+      "original_sha256": "24933629348632bb7fcb00d345c2a137a3fc0e93728988ba4e7149657ddf5e22",
+      "patched_sha256": "24933629348632bb7fcb00d345c2a137a3fc0e93728988ba4e7149657ddf5e22"
+    },
+    "cron/scheduler_delivery.py": {
+      "path": "cron/scheduler_delivery.py",
+      "backup": "cron/scheduler_delivery.py.hermes_feishu_card.bak",
+      "original_sha256": "ee4010c0b19e8fe71e22dc8cb82fddb70653e8583833066768199bba3de80573",
+      "patched_sha256": "e6d39a796c3c1323f0f4feb66cc033ed567a3814cb9bf523772cd70cbcf6be1a"
+    },
+    "gateway/platforms/base.py": {
+      "path": "gateway/platforms/base.py",
+      "backup": "gateway/platforms/base.py.hermes_feishu_card.bak",
+      "original_sha256": "8f5813ace60349909b00ade69fc04015059f4a6d8f12db12906de99468339919",
+      "patched_sha256": "d28fc2cc7ef2aed64846c2193d8d553f16f0049d5319e0acb7b4fc184e46edc0"
+    }
+  },
+  "integrity": {
+    "version": 3,
+    "kind": "verified_owned_snapshot",
+    "layout": "gateway-decomposed-v1",
+    "targets": {
+      "gateway/run.py": {
+        "original_sha256": "680c3c2cea322293f10ed52dd5a98546128a971623bad2d03c0e53052c649fb2",
+        "patched_sha256": "680c3c2cea322293f10ed52dd5a98546128a971623bad2d03c0e53052c649fb2"
+      },
+      "gateway/run_background.py": {
+        "original_sha256": "18fdb6a7fe408361544eca51d15659ec868d02876abce6866bc139bc454ff27f",
+        "patched_sha256": "18fdb6a7fe408361544eca51d15659ec868d02876abce6866bc139bc454ff27f"
+      },
+      "gateway/run_turn.py": {
+        "original_sha256": "32de792e49dbe085fca9ce17cf75e522a7ef67dcc375bd465e274127f089e333",
+        "patched_sha256": "1c085aa8f86ef99b99fe59dfbe2cb92ee7da311dd21a6547c03be290728b7264"
+      },
+      "gateway/run_turn_persistence.py": {
+        "original_sha256": "421a6e53664e91fcd7850908651a8ffdeef9d8b9b16a5883650a907459a94bfa",
+        "patched_sha256": "bb77aae0da9cc392a5d7df294c10806c7434eff26acc419696209fe5cb12c0e6"
+      },
+      "gateway/run_turn_prepare.py": {
+        "original_sha256": "63fdc7cbdf694e7b7a22b309dd99f131b23adf0e606e107c608d895b2a24edda",
+        "patched_sha256": "63fdc7cbdf694e7b7a22b309dd99f131b23adf0e606e107c608d895b2a24edda"
+      },
+      "gateway/run_turn_hygiene.py": {
+        "original_sha256": "ce9d47df93e786da4547b2bf019e608bf553f893c877a6d2d22c72a05da4cf64",
+        "patched_sha256": "ce9d47df93e786da4547b2bf019e608bf553f893c877a6d2d22c72a05da4cf64"
+      },
+      "gateway/run_turn_runner.py": {
+        "original_sha256": "76a97f48cc5f769c84991644957e0e9d64c4be60dbd0774ec7457e740da253fb",
+        "patched_sha256": "15d7c781b00484737743a6fc288c1f2c52230ab4b013345d5de5157ca9d54aaf"
+      },
+      "gateway/run_inbound.py": {
+        "original_sha256": "8113f9fc356f18c6eeaf985e1e523a09826933dea2b81ed227461b9f559dae39",
+        "patched_sha256": "971d77238832d34371a4abcb5873712342949f959756b4a9847d6e838d8fa7f4"
+      },
+      "gateway/run_busy.py": {
+        "original_sha256": "0cda08c818b0b23bd6cf784073688fbf5ee05015d95feb5ecd8c90775a0c7f2e",
+        "patched_sha256": "f719aa55835dcff95fcea079d6359d8589916636480df21840fd0229f870774b"
+      },
+      "gateway/run_startup.py": {
+        "original_sha256": "51e47a16005c7ae68f190499c5998e3fffeb1c4df07a9ccdee2bec1012fd6884",
+        "patched_sha256": "b3d0bb622929a25a6aa9324ede42cf42f16948acf53f8a047bccec66068292fd"
+      },
+      "gateway/run_notifications.py": {
+        "original_sha256": "09566558ee1f967c90f62871c992db2e5922c062bdb534167e55257bdf65b003",
+        "patched_sha256": "e156bced1c28743477f6c405aa833f40b9ef5836ac258a7b1705ec6b7a056c71"
+      },
+      "cron/scheduler.py": {
+        "original_sha256": "24933629348632bb7fcb00d345c2a137a3fc0e93728988ba4e7149657ddf5e22",
+        "patched_sha256": "24933629348632bb7fcb00d345c2a137a3fc0e93728988ba4e7149657ddf5e22"
+      },
+      "cron/scheduler_delivery.py": {
+        "original_sha256": "ee4010c0b19e8fe71e22dc8cb82fddb70653e8583833066768199bba3de80573",
+        "patched_sha256": "e6d39a796c3c1323f0f4feb66cc033ed567a3814cb9bf523772cd70cbcf6be1a"
+      },
+      "gateway/platforms/base.py": {
+        "original_sha256": "8f5813ace60349909b00ade69fc04015059f4a6d8f12db12906de99468339919",
+        "patched_sha256": "d28fc2cc7ef2aed64846c2193d8d553f16f0049d5319e0acb7b4fc184e46edc0"
+      }
+    }
+  }
+}

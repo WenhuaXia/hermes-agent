@@ -175,8 +175,10 @@ class GatewayTurnHygieneMixin:
         with image_cost_context(learned_image_token_cost(hs.model, hs.base_url)):
             if session_entry.last_prompt_tokens <= 0:
                 from agent.usage_anchor import persisted_anchor_tokens
-                _store = getattr(self, "persistence", None)
-                _anchored = persisted_anchor_tokens(_store, session_entry.session_id, history, persistence=_store)
+                _session_db = getattr(self, "_session_db", None)
+                _anchored = persisted_anchor_tokens(
+                    getattr(_session_db, "_db", _session_db), session_entry.session_id, history,
+                )
             if session_entry.last_prompt_tokens > 0:
                 _approx_tokens, _token_source = session_entry.last_prompt_tokens, "actual"
             elif _anchored is not None:
@@ -193,16 +195,17 @@ class GatewayTurnHygieneMixin:
             # failing compression is not re-triggered on every restart.
             # The in-memory dict was reset on every restart, re-triggering the same failing compression and
             # wedging session storage (#74136).
-            _store = getattr(self, "persistence", None)
-            if _store is not None:
-                _cooldown, _now = None, time.time()
+            _session_db = getattr(self, "_session_db", None)
+            _getter = getattr(getattr(_session_db, "_db", _session_db), "get_compression_failure_cooldown", None)
+            if _getter is not None:
+                _cooldown_state = None
                 with suppress(Exception):
-                    _cooldown = _store.messages.read_compression_cooldown(session_entry.session_id, _now)
-                if _cooldown is not None and _cooldown.until - _now > 0:
+                    _cooldown_state = _getter(session_entry.session_id)
+                if _cooldown_state and _cooldown_state.get("remaining_seconds", 0) > 0:
                     logger.info(
                         "Session hygiene: skipping compression for %s; "
                         "previous failure cooldown active for %.1fs",
-                        session_entry.session_id, _cooldown.until - _now,
+                        session_entry.session_id, _cooldown_state["remaining_seconds"],
                     )
                     _needs_compress = False
 
@@ -661,12 +664,11 @@ class GatewayTurnHygieneMixin:
 
     async def _hmwa_hygiene_build_agent(self, _hyg_model, _hyg_runtime, session_entry):
         """Build the detached hygiene ``AIAgent`` with the live session's system prompt. Returns
-        ``(agent, storage interface handle)``."""
+        ``(agent, sync_session_db)``."""
         from gateway.run import _GATEWAY_HYGIENE_PLATFORM, _seed_hygiene_system_prompt
         from run_agent import AIAgent
         try:
-            _hyg_record = await self.persistence.aio.sessions.get(session_entry.session_id)
-            _hyg_session_row = {"system_prompt": _hyg_record.system_prompt} if _hyg_record is not None else None
+            _hyg_session_row = await self._session_db.get_session(session_entry.session_id)
         except Exception as exc:
             _hyg_session_row = None
             logger.warning(
@@ -674,7 +676,7 @@ class GatewayTurnHygieneMixin:
                 "Preserving an empty prompt so the live turn rebuilds it with its "
                 "configured providers.", session_entry.session_id, exc, exc_info=True,
             )
-        _hyg_session_db = getattr(self, "persistence", None)
+        _hyg_session_db = getattr(self._session_db, "_db", self._session_db)
         # With compression.checkpoint_required on, load the memory provider so the checkpoint exists
         # before any mutation; otherwise keep the fast path (no provider init).
         from hermes_cli.config import load_config as _load_cfg
@@ -686,7 +688,7 @@ class GatewayTurnHygieneMixin:
         _hyg_agent = AIAgent(
             **_hyg_runtime, model=_hyg_model, max_iterations=4, quiet_mode=True,
             skip_memory=not _hyg_checkpoint_required, enabled_toolsets=["memory"],
-            session_id=session_entry.session_id, persistence=_hyg_session_db,
+            session_id=session_entry.session_id, session_db=_hyg_session_db,
         )
         _seed_hygiene_system_prompt(_hyg_agent, _hyg_session_row)
         # The stamp only marks this agent as no real surface. Since #104414 Platform is not a
@@ -709,14 +711,9 @@ class GatewayTurnHygieneMixin:
             # Hygiene owns the session binding, so prefer in-place compaction over minting a
             # continuation child. Without a SessionDB this stays False.
             _hyg_agent.compression_in_place = True
-            _hyg_engine = getattr(_hyg_agent, "context_compressor", None)
-            _bind_hyg_state = getattr(_hyg_engine, "bind_session_state", None)
+            _bind_hyg_state = getattr(getattr(_hyg_agent, "context_compressor", None), "bind_session_state", None)
             if callable(_bind_hyg_state):
-                from agent.conversation_compression import context_engine_persistence, context_engine_session_db
-
-                # A plugin engine rebinds the SessionDB the agent bound it with, which the agent's close() closes.
-                _bind_hyg_state(context_engine_session_db(_hyg_agent, _hyg_session_db), session_entry.session_id,
-                                **context_engine_persistence(_bind_hyg_state, _hyg_session_db))
+                _bind_hyg_state(_hyg_session_db, session_entry.session_id)
             # Never finalize on close() — that would end the live gateway session row.
             _hyg_agent._end_session_on_close = False
             _hyg_agent._print_fn = lambda *a, **kw: None
