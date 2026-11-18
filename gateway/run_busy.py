@@ -468,11 +468,12 @@ class GatewayBusySessionMixin:
             return False
         except Exception:
             return _assume_active("session", session_key)
-        store = getattr(self, "persistence", None)
-        if not session_id or store is None:
+        session_db = getattr(self, "_session_db", None)
+        if not session_id or session_db is None:
             return False
+        raw_db = getattr(session_db, "_db", session_db)
         try:
-            holder = await asyncio.to_thread(store.coordination.get_compression_lock_holder, session_id=str(session_id))
+            holder = await asyncio.to_thread(raw_db.get_compression_lock_holder, str(session_id))
             # Production returns Optional[str]. Reject non-strings so a MagicMock auto-attr (or any
             # unexpected truthy) cannot look like a held lock and skip hygiene.
             # See #96953.
@@ -567,17 +568,12 @@ class GatewayBusySessionMixin:
         return (enriched_text or text).strip() if successful_transcripts else text
 
     def _steer_text_with_origin(self, text: str, event: MessageEvent) -> str:
-        """Keep event origin in this injection, never in the cached system prompt. In a shared
-        session the text carries the same ``[Name]`` sender label a turn-opening message gets."""
+        """Keep event origin in this injection, never in the cached system prompt."""
         if not text.strip():
             return text
         import json
-        from gateway.session import label_shared_sender
 
         source = event.source
-        text = label_shared_sender(
-            source, text, group_sessions_per_user=getattr(self.config, "group_sessions_per_user", True),
-            thread_sessions_per_user=getattr(self.config, "thread_sessions_per_user", False))
         origin = {
             "platform": source.platform.value,
             **{key: getattr(source, key) for key in (
@@ -586,7 +582,6 @@ class GatewayBusySessionMixin:
             )},
             "message_id": event.message_id,
             "source_message_id": source.message_id,
-            "from_bot": True if source.is_bot else None,  # a bot/integration post, not the person helped
         }
         origin = {key: value for key, value in origin.items() if value not in (None, "")}
         from gateway.run import _load_gateway_config
@@ -602,7 +597,7 @@ class GatewayBusySessionMixin:
                 "chat_id": _hash_chat_id, "chat_id_alt": _hash_chat_id,
                 "parent_chat_id": _hash_chat_id,
             }
-            origin = {key: (value if key in ("platform", "chat_type", "from_bot") else
+            origin = {key: (value if key in ("platform", "chat_type") else
                             hashers.get(key, _hash_id)(value)) for key, value in origin.items()}
         # JSON preserves identifiers exactly (including colons/whitespace) instead of
         # normalizing them into another destination. Escape marker delimiters too.
@@ -630,11 +625,22 @@ class GatewayBusySessionMixin:
             logger.debug("Busy-path notice suppressed for bot-authored message in %s", event.source.chat_id)
             return
         reply_anchor = self._reply_anchor_for_event(event)
-        await adapter._send_with_retry(
+        # HERMES_FEISHU_CARD_BUSY_RECALL_PATCH_BEGIN_V1
+        _hfc_recall_result = await adapter._send_with_retry(
             chat_id=event.source.chat_id, content=content,
             reply_to=reply_anchor if plain_anchor else self._busy_reply_to(event, reply_anchor),
             metadata=self._thread_metadata_for_source(event.source, reply_anchor),
         )
+        try:
+            from hermes_feishu_card.hook_runtime import recall_busy_redirect_ack_async as _hfc_recall_ack
+            await _hfc_recall_ack(event, content, _hfc_recall_result)
+        except Exception as _hfc_exc:
+            try:
+                import sys as _hfc_sys
+                print("[hermes-feishu-card] hook failed: " + _hfc_exc.__class__.__name__ + ": " + str(_hfc_exc), file=_hfc_sys.stderr)
+            except Exception:
+                pass
+        # HERMES_FEISHU_CARD_BUSY_RECALL_PATCH_END_V1
 
     async def _send_busy_drain_notice(self, event: MessageEvent, session_key: str, effective_mode: str) -> None:
         """Busy path while the gateway is restarting/stopping: queue (if allowed) and tell the user."""
@@ -814,10 +820,7 @@ class GatewayBusySessionMixin:
         """The running turn now answers *event* too (steer, redirect): if *event* was addressed to
         the bot, a bare silence marker must not end the turn, and once another sender's input joins
         it the turn has no single actor (approvals raised after it fail closed). Returns the turn,
-        or None when a newer turn already owns the slot. A plugin turn waiting for the session's
-        background work stops waiting, as for a person's queued input."""
-        from gateway.run_plugin_injection import person_input_joined_turn
-        person_input_joined_turn(self, session_key)
+        or None when a newer turn already owns the slot."""
         turn = self._session_state(session_key).turn
         if turn.agent is not running_agent:
             return None
@@ -831,10 +834,18 @@ class GatewayBusySessionMixin:
         return turn
 
     async def _interrupt_running_agent_for_busy_event(self, event: MessageEvent, adapter, running_agent) -> None:
-        """Interrupt mode: abort in-flight tool calls; the agent loop exits at its next check point.
-        The event is already queued: a voice note is transcribed by its follow-up turn, not here."""
+        """Interrupt mode: abort in-flight tool calls; the agent loop exits at its next check point."""
+        from gateway.run import _build_media_placeholder
         try:
-            running_agent.interrupt(self._busy_interrupt_text(event))
+            _interrupt_text = event.text
+            _media_urls = getattr(event, "media_urls", None) or []
+            if self._pending_event_audio_paths(event):
+                _interrupt_text, _ = await self._transcribe_and_echo_pending_voice(
+                    event, adapter, event.source, event.text or "", log_context="Voice-busy-interrupt",
+                )
+            elif not _interrupt_text and _media_urls:
+                _interrupt_text = _build_media_placeholder(event)
+            running_agent.interrupt(_interrupt_text)
         except Exception:
             pass  # don't let interrupt failure block the ack
 
@@ -956,7 +967,7 @@ class GatewayBusySessionMixin:
         if not self._is_user_authorized_for_source(event.source):
             logger.warning(
                 "Dropping message from unauthorized user in active session: "
-                "user=%s, platform=%s, session=%s", event.source.user_id,
+                "user=%s (%s), platform=%s, session=%s", event.source.user_id, event.source.user_name,
                 event.source.platform.value if event.source.platform else "unknown", session_key,
             )
             return True  # handled (silently dropped); do not fall through
@@ -1100,7 +1111,7 @@ class GatewayBusySessionMixin:
 
     # busy_handler key (hermes_cli/commands.py CommandDef) → mid-run variant ``_busy_<key>_command``.
     _BUSY_SPECIAL_HANDLERS: dict[str, str] = {
-        k: f"_busy_{k}_command" for k in ("start", "stop", "new", "queue", "steer", "egress", "goal", "loop", "moa")
+        k: f"_busy_{k}_command" for k in ("start", "stop", "new", "queue", "steer", "egress", "goal", "loop")
     }
 
     async def _dispatch_busy_slash_command(self, event: MessageEvent, cmd_def, quick_key: str, source):
@@ -1179,7 +1190,6 @@ class GatewayBusySessionMixin:
         return format_status_text()
 
     async def _busy_stop_command(self, event: MessageEvent, quick_key: str, source):
-        event.accept_interrupt()  # past admission and slash access: the adapter may cancel the turn
         # Hard-kill: a soft interrupt can't reach a truly hung executor thread.
         from gateway.run import _INTERRUPT_REASON_STOP
         await _busy_accepted()
@@ -1211,45 +1221,30 @@ class GatewayBusySessionMixin:
         await _busy_accepted()
         adapter = self._delivery_adapter_for(source)
         if adapter:
-            queued = self._queued_turn_event(event, queued_text, has_media)
+            queued = MessageEvent(
+                text=queued_text, message_type=event.message_type if has_media else MessageType.TEXT,
+                source=event.source, raw_message=event.raw_message, message_id=event.message_id,
+                media_urls=list(getattr(event, "media_urls", []) or []),
+                media_types=list(getattr(event, "media_types", []) or []),
+                media_text_inlined=list(getattr(event, "media_text_inlined", []) or []),
+                media_filenames=list(getattr(event, "media_filenames", []) or []),
+                reply_to_message_id=event.reply_to_message_id, reply_to_text=event.reply_to_text,
+                reply_to_author_id=event.reply_to_author_id,
+                reply_to_author_name=event.reply_to_author_name,
+                reply_to_is_own_message=event.reply_to_is_own_message, auto_skill=event.auto_skill,
+                channel_prompt=event.channel_prompt, channel_context=event.channel_context,
+                internal=event.internal, timestamp=event.timestamp,
+                edit_revision=event.edit_revision,  # an edited /queue is its own input (admission id)
+            )
             if await self._queue_command_turn(quick_key, event, queued, adapter, t("gateway.queue.queued")):
                 return None  # its commit sends the ack
         depth = self._queue_depth(quick_key, adapter=adapter)
         return t("gateway.queue.queued") + (t("gateway.queue.queued_depth", depth=depth) if depth > 1 else "")
 
-    @staticmethod
-    def _queued_turn_event(event: MessageEvent, text: str, has_media: bool) -> MessageEvent:
-        """*event*'s turn as its own FIFO input with *text* as the prompt (``/queue``, ``/moa``)."""
-        return MessageEvent(
-            text=text, message_type=event.message_type if has_media else MessageType.TEXT,
-            source=event.source, raw_message=event.raw_message, message_id=event.message_id,
-            media_urls=list(getattr(event, "media_urls", []) or []),
-            media_types=list(getattr(event, "media_types", []) or []),
-            media_text_inlined=list(getattr(event, "media_text_inlined", []) or []),
-            media_filenames=list(getattr(event, "media_filenames", []) or []),
-            reply_to_message_id=event.reply_to_message_id, reply_to_text=event.reply_to_text,
-            reply_to_author_id=event.reply_to_author_id,
-            reply_to_author_name=event.reply_to_author_name,
-            reply_to_is_own_message=event.reply_to_is_own_message, auto_skill=event.auto_skill,
-            channel_prompt=event.channel_prompt, channel_context=event.channel_context,
-            internal=event.internal, timestamp=event.timestamp,
-            edit_revision=event.edit_revision,  # an edited /queue is its own input (admission id)
-        )
-
-    async def _busy_moa_command(self, event: MessageEvent, quick_key: str, source):
-        from gateway.session_moa_turn import queue_busy_moa
-        return await queue_busy_moa(self, event, quick_key, source)
-
     async def _busy_steer_command(self, event: MessageEvent, quick_key: str, source):
         # /steer lands BETWEEN tool-call iterations of the same run (appended to the last tool
         # result) — no interrupt, no new user turn, no role-alternation violation.
         from gateway.run import _AGENT_PENDING_SENTINEL
-
-        # A steer carries text only; media cannot ride one. The plain-message busy gate already
-        # demotes non-text input to queue for exactly this reason (#70253) — a /steer caption must
-        # not be the one path that still drops the photo: queue the whole event instead (#132371).
-        if getattr(event, "media_urls", None) or getattr(event, "media_types", None):
-            return await self._busy_queue_command(event, quick_key, source)
         steer_text = event.get_command_args().strip()
         if not steer_text:
             return t("gateway.steer.usage")
@@ -1298,10 +1293,9 @@ class GatewayBusySessionMixin:
 
     def _command_turn_admitted(self, event: MessageEvent, session_key: str) -> bool:
         """Whether *event*, a turn a slash command produced, goes to the authority's FIFO. Text that is
-        still a command, an internal event, an executing admission and a turn while a session-level
-        one-turn model is armed (``/model --once``, which would otherwise land on whichever admitted
-        turn runs next) stay in-process, as without an authority. A messaging ``/moa`` commits its
-        preset on its own row instead (``session_moa_turn``)."""
+        still a command, an internal event, an executing admission and a turn carrying a one-turn
+        model (``/moa``, which would otherwise land on whichever admitted turn runs next) stay
+        in-process, as without an authority."""
         from gateway.session_authorities import active_authority
         from gateway.session_ingress import executing_admission
         if active_authority(self) is None or executing_admission.get() or event.internal or event.get_command():
@@ -1423,7 +1417,7 @@ class GatewayBusySessionMixin:
             "Slash command /%s denied for %s:%s (not admin, not in user_allowed_commands)",
             canonical_cmd, source.platform.value if source.platform else "?", source.user_id,
         )
-        allowed_preview = sorted(policy.user_runnable_commands)
+        allowed_preview = sorted(policy.user_allowed_commands)
         if allowed_preview:
             suffix = (
                 t("gateway.unauthorized.admin_only_can_run") + ", ".join(f"/{c}" for c in allowed_preview[:12])
@@ -1502,10 +1496,9 @@ class GatewayBusySessionMixin:
     def _is_stale_restart_redelivery(self, event: MessageEvent) -> bool:
         """True if this /restart is a Telegram re-delivery we already handled.
 
-        The previous gateway wrote ``.restart_last_processed.json`` (platform + transport +
-        update_id). Within that bot's stream, update_id <= that value is a redelivery when this
-        process booted from that restart; otherwise the marker must be < 5 minutes old.
-        Telegram only (numeric ordering); legacy markers retain their unscoped behavior.
+        The previous gateway wrote ``.restart_last_processed.json`` (platform + update_id). A
+        /restart with update_id <= that value is a redelivery when this process booted from that
+        restart; otherwise the marker must be < 5 minutes old. Telegram only (numeric ordering).
         """
         from gateway.run import _hermes_home
         if event is None or event.source is None or event.platform_update_id is None:
@@ -1535,14 +1528,6 @@ class GatewayBusySessionMixin:
                 return False
             data = json.loads(marker_path.read_text(encoding="utf-8-sig"))
         except Exception:
-            return False
-
-        from gateway.session_identity import transport_profile_of
-
-        # Telegram update IDs are ordered per bot, not across the multiplexed process.
-        # Runtime profiles may be shared by several bots, so use the receiving transport.
-        recorded_profile = data.get("transport_profile")
-        if recorded_profile is not None and recorded_profile != transport_profile_of(event.source):
             return False
 
         recorded_uid = data.get("update_id")
@@ -1669,16 +1654,49 @@ class GatewayBusySessionMixin:
         # object.__new__ test runners lack the counter; fall back to a local one.
         counter = getattr(self, "_slash_confirm_counter", None)
         if counter is None:
-            from gateway.platforms.helpers import prompt_id_counter
-            counter = self._slash_confirm_counter = prompt_id_counter()
+            import itertools as _itertools
+            counter = self._slash_confirm_counter = _itertools.count(1)
         confirm_id = f"{next(counter)}"
 
-        # Register FIRST so a fast button click cannot race the send_slash_confirm return. The
-        # command runs outside any turn: its sender is the requester, never a bound turn's actor.
-        from tools.approval_context import prompt_authority
-        actor = event if event.user_id is not None else source  # as session_context binds it
-        _slash_confirm_mod.register(session_key, confirm_id, command, handler, authority=prompt_authority(
-            str(event.sender_id() or ""), str(actor.user_name or ""), str(getattr(source, "chat_type", None) or "")))
+        # Register FIRST so a fast button click cannot race the send_slash_confirm return.
+        _slash_confirm_mod.register(session_key, confirm_id, command, handler)
+        # HERMES_FEISHU_CARD_SLASH_CONFIRM_PATCH_BEGIN
+        try:
+            from hermes_feishu_card.hook_runtime import request_slash_confirm_from_hermes_locals_async as _hfc_request_slash_confirm
+            from hermes_feishu_card.hook_runtime import complete_command_card_from_hermes_locals_async as _hfc_complete_command_card
+            from hashlib import sha256 as _hfc_sha256
+            _hfc_slash_reply_to = None
+            try:
+                _hfc_slash_reply_to = self._reply_anchor_for_event(event)
+            except Exception:
+                _hfc_slash_reply_to = getattr(event, "message_id", None)
+            _hfc_slash_interaction_seed = (str(session_key) + ":" + str(confirm_id)).encode("utf-8")
+            _hfc_slash_interaction_id = "slash_" + _hfc_sha256(_hfc_slash_interaction_seed).hexdigest()[:16]
+            _hfc_slash_choice = await _hfc_request_slash_confirm({
+                **locals(),
+                "source": source,
+                "chat_id": getattr(source, "chat_id", ""),
+                "conversation_id": session_key,
+                "message_id": _hfc_slash_reply_to,
+                "reply_to_message_id": _hfc_slash_reply_to,
+            }, command=command, title=title, message=message, interaction_id=_hfc_slash_interaction_id)
+            if _hfc_slash_choice in {"once", "always", "cancel"}:
+                _hfc_slash_result = await handler(_hfc_slash_choice)
+                if await _hfc_complete_command_card({
+                    "source": source,
+                    "chat_id": getattr(source, "chat_id", ""),
+                    "conversation_id": session_key,
+                    "message_id": _hfc_slash_reply_to,
+                }, answer=_hfc_slash_result):
+                    return None
+                return _hfc_slash_result
+        except Exception as _hfc_exc:
+            try:
+                import sys as _hfc_sys
+                print("[hermes-feishu-card] hook failed: " + _hfc_exc.__class__.__name__ + ": " + str(_hfc_exc), file=_hfc_sys.stderr)
+            except Exception:
+                pass
+        # HERMES_FEISHU_CARD_SLASH_CONFIRM_PATCH_END
 
         adapter = self._delivery_adapter_for(source)
         metadata = self._thread_metadata_for_source(source, self._reply_anchor_for_event(event))
