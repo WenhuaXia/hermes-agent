@@ -672,11 +672,14 @@ class GatewayInboundMixin(GatewayInboundHooksMixin, GatewayInboundTranscriptionM
                 authority.fence_route(_quick_key)
             return
         from gateway.session_contract import SessionActor, SessionRef
-        from hermes_state_runtime import RuntimeStoreError, list_session_admissions
+        from persistence.core.errors import AuthorityRefusal
+        from persistence.sqlite.authority._admission_store import list_session_admissions
+        from gateway.session_persistence import authority_persistence
         ref = SessionRef(authority.profile_id, sid)
         actor = SessionActor('messaging-control', authority.profile_id,
                           frozenset({'session:submit', 'session:control'}), 'busy-command')
-        rows = await asyncio.to_thread(list_session_admissions, authority.db, session_id=sid)
+        store = authority_persistence(authority)
+        rows = await asyncio.to_thread(list_session_admissions, store, session_id=sid)
         # A FIFO paused on a lost (``unknown``) turn is the operator's to resume: its pause notice
         # promised the queued followers stay saved, so a /new from the chat leaves them queued.
         paused = any(row['status'] == 'unknown' for row in rows)
@@ -685,16 +688,16 @@ class GatewayInboundMixin(GatewayInboundHooksMixin, GatewayInboundTranscriptionM
             # commits after it; one that committed before the fence is in the second listing and
             # cancelled below. A paused FIFO keeps both, like its queued followers.
             authority.fence_route(_quick_key)
-            rows = await asyncio.to_thread(list_session_admissions, authority.db, session_id=sid)
+            rows = await asyncio.to_thread(list_session_admissions, store, session_id=sid)
         for row in [] if paused else rows:
             if row['status'] == 'queued' and row['principal_id'].startswith('messaging:'):
                 # Claimed meanwhile (stale_generation): it runs as main's post-claim race does.
-                with suppress(RuntimeStoreError):
+                with suppress(AuthorityRefusal):
                     await authority.cancel_queued(actor, ref, row['admission_id'])
         handle = authority._handle(ref)
         if handle.execution_state == 'running':
             # Settled meanwhile (stale_generation): there is no claimed turn left to stop.
-            with suppress(RuntimeStoreError):
+            with suppress(AuthorityRefusal):
                 await authority.interrupt(actor, ref, handle.execution_generation)
 
     def _hm_busy_telegram_grace_queue(
@@ -1288,8 +1291,8 @@ class GatewayInboundMixin(GatewayInboundHooksMixin, GatewayInboundTranscriptionM
         if (authority is None and not is_internal and not event.get_command()
                 and getattr(self, 'session_authority', None) is not None):
             # Scoped to a home this process does not serve: never fall back to the launch ledger.
-            from hermes_state_runtime import RuntimeStoreError
-            raise RuntimeStoreError('profile_mismatch')
+            from persistence.core.errors import AuthorityRefusal
+            raise AuthorityRefusal('profile_mismatch')
         return False, None
 
     async def _hm_admit_to_fifo(

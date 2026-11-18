@@ -182,6 +182,13 @@ def _resolve_channel_runtime(runner, source, model, runtime_kwargs) -> tuple[str
     return model, runtime_kwargs
 
 
+def _authority_compression_chain(authority, owner):
+    """The compression-continuation chain *owner*s preflight walks, over *authority*s persistence."""
+    from persistence.sqlite.conversation._store.compression import get_compression_chain
+
+    return get_compression_chain(authority.persistence, owner)
+
+
 class GatewayTurnPrepareMixin:
     def _resolve_session_agent_runtime(
         self, *, source: Optional[SessionSource] = None, session_key: Optional[str] = None,
@@ -405,6 +412,7 @@ class GatewayTurnPrepareMixin:
                 )
                 return
 
+
         strict_session = bool(event_metadata.get("gateway_session_strict"))
         pinned_session_id = str(event_metadata.get("gateway_session_id") or "").strip()
         if strict_session:
@@ -430,7 +438,7 @@ class GatewayTurnPrepareMixin:
             # /resume, /branch and compression don't, so those turns run where the route points.
             stopped = generation in (authority.pending_stops.get(owner), authority.delivered_stops.get(owner))
             if stopped and session_entry.session_id not in await asyncio.to_thread(
-                    authority.db.get_compression_chain, owner):  # preflight's continuation walk
+                    _authority_compression_chain, authority, owner):  # preflight's continuation walk
                 # It settles interrupted, as that Stop would have, and never runs on the fresh one.
                 logger.warning("Dropping a stopped claimed turn: its route moved from %s to %s before it ran",
                                owner, session_entry.session_id)

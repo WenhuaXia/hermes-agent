@@ -1874,12 +1874,13 @@ def _open_cron_session_db(job: dict):
         def acquire_store():
             if owner is None:
                 return acquire()
-            db = acquire(Path(owner[0].db.db_path))
-            if db is not owner[0].db:
-                from hermes_state_registry import release_or_close
-                release_or_close(db)
-                raise RuntimeError('cron requires the canonical owner store')
-            return db
+            # owner[0] is the SessionAuthority of the admitting gateway: borrow the persistence
+            # handle it was built with (its scope's own state.db) instead of the removed .db.
+            persistence = owner[0].persistence
+            scope = getattr(persistence, "scope", None)
+            if scope is not None:
+                return acquire(Path(scope.hermes_home_key) / "state.db")
+            return acquire()
 
         if _session_db_timeout <= 0:
             return acquire_store()

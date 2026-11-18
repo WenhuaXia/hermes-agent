@@ -3353,12 +3353,8 @@ class GatewayRunner(
 
     # Legacy per-session dict attrs as LIVE views over ``self._sessions``; new code: _session_state(key)
     _running_agents = legacy_dict_property("_running_agents")
-    _running_agents_ts = legacy_dict_property("_running_agents_ts")
-    _busy_ack_ts = legacy_dict_property("_busy_ack_ts")
     _session_model_overrides = legacy_dict_property("_session_model_overrides")
-    _queued_events = legacy_dict_property("_queued_events")
     _pending_messages = legacy_dict_property("_pending_messages")
-    _pending_approvals = legacy_dict_property("_pending_approvals")
 
     def _sessions_map(self) -> dict[str, SessionState]:
         """Per-session state map; lazily created so bare ``object.__new__`` test runners work."""
@@ -3481,12 +3477,28 @@ class GatewayRunner(
             # is nothing to borrow, so nothing is cached here either.
             store = getattr(self, "session_store", None)
             borrowed = getattr(store, "_db", None) if store is not None else None
+            # session_store._db returns the _DB_UNPINNED sentinel when unpinned (a property),
+            # not None — treat the sentinel as "no borrowed handle" and resolve the live
+            # scoped persistence instead so state.db is not opened twice.
+            if store is not None and borrowed is not None:
+                from gateway.session import _DB_UNPINNED
+                if borrowed is _DB_UNPINNED:
+                    borrowed = None
             if borrowed is not None:
                 wrapper = AsyncSessionDB(borrowed)
                 # close_all_session_db_handles() must not close what the store owns (its sweep runs first).
                 wrapper.__dict__["_hermes_borrowed_handle"] = True
                 return wrapper
             if store is not None:
+                scoped = None
+                try:
+                    scoped = store._scoped_persistence()
+                except Exception:
+                    pass
+                if scoped is not None:
+                    wrapper = AsyncSessionDB(scoped)
+                    wrapper.__dict__["_hermes_borrowed_handle"] = True
+                    return wrapper
                 # Store handle unavailable: opening our own would resurrect the duplicate borrowed away.
                 raise RuntimeError("SessionStore SQLite handle unavailable")
             try:

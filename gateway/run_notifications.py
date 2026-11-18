@@ -660,14 +660,22 @@ class GatewayNotificationsMixin(GatewayUpdateNotificationsMixin, GatewayNotifica
             # restore advice above would be destructive on a healthy file (#97794).
             message = t("gateway.startup.db_fts_corrupt", profile_arg=profile_arg)
         else:
-            from hermes_state_user_copy import describe_storage_failure
-            failure = describe_storage_failure(error)
+            try:
+                from hermes_state_user_copy import describe_storage_failure
+            except ImportError:  # module not shipped in this tree; use a minimal stand-in
+                class _StorageFailure:
+                    action = "run 'hermes doctor --fix'"
+                    cause = "unknown"
+                    gloss = str(error)
+                failure = _StorageFailure()
+            else:
+                failure = describe_storage_failure(error)
             # The cause table owns the remedy: for a held retired-WAL generation a bare `doctor --fix`
             # is the second-writer trap this notice used to send users into (#110054). Its copy is
             # user-phrased, so a store-level failure still gets the operator tail — this gateway
             # opened its store at startup and stays broken until it is restarted.
             action = failure.action
-            if failure.cause not in _SELF_CLEARING_STORAGE_CAUSES:
+            if getattr(failure, "cause", None) not in _SELF_CLEARING_STORAGE_CAUSES:
                 action = t("gateway.startup.db_then_restart", action=action, profile_arg=profile_arg)
             message = t("gateway.startup.db_unavailable", cause=failure.gloss, action=action)
         logger.warning("Broadcasting state.db failure warning to home channels: %s", error)
@@ -924,7 +932,7 @@ class GatewayNotificationsMixin(GatewayUpdateNotificationsMixin, GatewayNotifica
         from gateway.session_authorities import active_authority
         from gateway.session_automation import committed_route_envelope
         from gateway.session_envelope import restore_native
-        from hermes_state_runtime import RuntimeStoreError
+        from persistence.core.errors import AuthorityRefusal
         authority = active_authority(self)
         if authority is None:
             return None
@@ -936,7 +944,7 @@ class GatewayNotificationsMixin(GatewayUpdateNotificationsMixin, GatewayNotifica
         try:
             restored = restore_native({'text': '', 'native_text_v1': {
                 key: value for key, value in envelope.items() if key != 'media'}}, self)
-        except RuntimeStoreError:
+        except AuthorityRefusal:
             return None
         return self._adapter_for_source(restored.source)
 
@@ -1020,10 +1028,10 @@ class GatewayNotificationsMixin(GatewayUpdateNotificationsMixin, GatewayNotifica
             authority = active_authority(self)
             if authority is not None:
                 from gateway.session_automation import admit_process_notice
-                from hermes_state_runtime import RuntimeStoreError
+                from persistence.core.errors import AuthorityRefusal
                 try:
                     await admit_process_notice(self, authority, adapter, synth_event, evt)
-                except RuntimeStoreError as exc:
+                except AuthorityRefusal as exc:
                     raise WakeNotAccepted(str(exc), reason=exc.reason) from exc
             else:
                 await admit_internal_event(adapter, synth_event)

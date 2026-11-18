@@ -605,7 +605,16 @@ def _resolve(name: "str") -> "Any":
     if name == "DEFAULT_DB_PATH":
         from persistence_assembly import profile_scope, store_location
 
-        return store_location(profile_scope())
+        location = store_location(profile_scope())
+        return location if location is not None else ""
+    if name == "_default_db_path":
+        from persistence_assembly import profile_scope, store_location
+
+        def _default_db_path():
+            location = store_location(profile_scope())
+            return location if location is not None else ""
+
+        return _default_db_path
     if name in _LOCAL:
         return _LOCAL[name]
     module, attr = _FORWARDED[name]
@@ -637,13 +646,13 @@ def _engine_session_db(engine: "Any", db_path: "Path", read_only: "bool") -> "_S
 
 
 def __getattr__(name: "str") -> "Any":
-    if name not in _REPLACEMENTS:
+    if name not in _REPLACEMENTS and name != "_default_db_path":
         raise AttributeError(
             f"module 'hermes_state' has no attribute {name!r}: the old session store was removed and this module "
             f"carries only the names the plugin guide lists ({_MIGRATION_GUIDE})"
         )
     value = _resolve(name)
-    if _first_warning():
+    if _first_warning() and name in _REPLACEMENTS:
         _warnings.warn(
             f"hermes_state.{name} is deprecated and is removed in {_REMOVAL_RELEASE}; use {_REPLACEMENTS[name]} "
             f"instead ({_MIGRATION_GUIDE}).",
